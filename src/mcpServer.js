@@ -33,8 +33,7 @@ const tool = (name, description, schema, handler) => {
     normalizeObjectSchema(schema ?? {});
   } catch (error) {
     throw new Error(
-      `Tool ${name} has an invalid input schema: ${
-        error instanceof Error ? error.message : String(error)
+      `Tool ${name} has an invalid input schema: ${error instanceof Error ? error.message : String(error)
       }`
     );
   }
