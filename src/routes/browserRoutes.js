@@ -32,12 +32,58 @@ router.get("/agent/state", (_req, res) => {
 
 router.post("/open", async (req, res) => {
   try {
-    const { sessionId, url, headless } = req.body || {};
+    const { sessionId, url, headless, persist } = req.body || {};
     if (!url) return res.status(400).json(failure("open", "Missing required field: url"));
-    const data = await runAgentAction("open", () => browserService.openUrl({ sessionId, url, headless }));
+    const data = await runAgentAction("open", () => browserService.openUrl({ sessionId, url, headless, persist }));
     return res.json(success("open", data));
   } catch (error) {
     return res.status(500).json(failure("open", error));
+  }
+});
+
+router.post("/scratchpad", async (req, res) => {
+  try {
+    const { sessionId, content } = req.body || {};
+    if (!sessionId) return res.status(400).json(failure("scratchpad", "Missing required field: sessionId"));
+    const data = await runAgentAction("scratchpad", () =>
+      browserService.updateScratchpad({ sessionId, content: String(content ?? "") })
+    );
+    return res.json(success("scratchpad", data));
+  } catch (error) {
+    return res.status(500).json(failure("scratchpad", error));
+  }
+});
+
+router.get("/test_page", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    if (!sessionId) return res.status(400).json(failure("test_page", "Missing required query: sessionId"));
+    const data = await runAgentAction("test_page", () => browserService.testPageQuality({ sessionId }));
+    return res.json(success("test_page", data));
+  } catch (error) {
+    return res.status(500).json(failure("test_page", error));
+  }
+});
+
+router.get("/capture_links", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    if (!sessionId) return res.status(400).json(failure("capture_links", "Missing required query: sessionId"));
+    const data = await runAgentAction("capture_links", () => browserService.captureLinkRoutes({ sessionId }));
+    return res.json(success("capture_links", data));
+  } catch (error) {
+    return res.status(500).json(failure("capture_links", error));
+  }
+});
+
+router.get("/inspect", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    if (!sessionId) return res.status(400).json(failure("inspect", "Missing required query: sessionId"));
+    const data = await runAgentAction("inspect", () => browserService.inspectPage({ sessionId }));
+    return res.json(success("inspect", data));
+  } catch (error) {
+    return res.status(500).json(failure("inspect", error));
   }
 });
 
@@ -72,7 +118,14 @@ router.get("/screenshot", async (req, res) => {
     const sessionId = req.query.sessionId;
     const fileName = req.query.fileName;
     if (!sessionId) return res.status(400).json(failure("screenshot", "Missing required query: sessionId"));
-    const data = await runAgentAction("screenshot", () => browserService.screenshot({ sessionId, fileName }));
+    const fullPage = String(req.query.fullPage || "").toLowerCase();
+    const data = await runAgentAction("screenshot", () =>
+      browserService.screenshot({
+        sessionId,
+        fileName,
+        fullPage: ["true", "1", "yes", "y"].includes(fullPage)
+      })
+    );
     return res.json(success("screenshot", data));
   } catch (error) {
     return res.status(500).json(failure("screenshot", error));

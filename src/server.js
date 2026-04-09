@@ -4,8 +4,10 @@ import { browserService } from "./services/browserService.js";
 
 const app = createApp();
 
-const server = app.listen(config.port, () => {
-  process.stdout.write(`MCP browser server listening on http://localhost:${config.port}\n`);
+const server = app.listen(config.port, config.host, () => {
+  process.stdout.write(
+    `MCP browser server listening on http://${config.host}:${config.port}\n`
+  );
 });
 
 const shutdown = async () => {

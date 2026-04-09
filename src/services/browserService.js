@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import { chromium } from "playwright";
 import { v4 as uuidv4 } from "uuid";
 import { config } from "../config.js";
+import { agentActivityService } from "./agentActivityService.js";
 
 class BrowserService {
   constructor() {
@@ -35,24 +36,69 @@ class BrowserService {
 
     const effectiveSessionId = sessionId || uuidv4();
     const headless = options.headless ?? config.defaultHeadless;
-    const browser = await chromium.launch({ headless });
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-    const page = await context.newPage();
+    const persist = options.persist ?? false;
+    const userDataDir = persist ? path.resolve("user_data", effectiveSessionId) : null;
+    // In headed mode, let the OS window size drive the viewport so Chromium can truly maximize.
+    // A fixed Playwright viewport (e.g. 1920x1080) can make the app appear "not fully visible"
+    // on Windows due to DPI scaling and non-maximized window bounds.
+    const viewport = headless ? { width: 1920, height: 1080 } : null;
+    const deviceScaleFactor = viewport ? 1 : undefined;
+
+    if (persist) {
+      await fs.mkdir(userDataDir, { recursive: true });
+    }
+
+    let browser;
+    let context;
+    let page;
+
+    if (persist) {
+      context = await chromium.launchPersistentContext(userDataDir, {
+        headless,
+        viewport,
+        ...(deviceScaleFactor ? { deviceScaleFactor } : {}),
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--start-maximized"
+        ]
+      });
+      page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+    } else {
+      browser = await chromium.launch({
+        headless,
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--start-maximized"
+        ]
+      });
+      context = await browser.newContext({
+        viewport,
+        ...(deviceScaleFactor ? { deviceScaleFactor } : {})
+      });
+      page = await context.newPage();
+    }
 
     const session = {
       id: effectiveSessionId,
-      browser,
+      browser: browser || null,
       context,
       page,
+      scratchpad: "",
       consoleErrors: [],
       networkErrors: [],
+      networkRequests: [],
       logs: [],
       actionHistory: [],
       screenshotHistory: [],
+      downloadHistory: [],
       lastAction: null,
       currentUrl: "about:blank",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      isPersisted: persist,
+      lastMousePos: { x: 960, y: 540 }
     };
+
+    await this.injectInteractionMonitor(session);
 
     page.on("console", (msg) => {
       if (msg.type() === "error") {
@@ -73,12 +119,47 @@ class BrowserService {
       });
     });
 
+    page.on("response", (response) => {
+      const status = response.status();
+      if (status >= 400) {
+        session.networkErrors.push({
+          url: response.url(),
+          method: response.request().method(),
+          failureText: `HTTP ${status}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+
+    page.on("download", async (download) => {
+      try {
+        await fs.mkdir("downloads", { recursive: true });
+        const suggested = download.suggestedFilename?.() || `download-${Date.now()}`;
+        const safeName = suggested.replace(/[^\w.\-() ]/g, "_");
+        const outPath = path.resolve("downloads", `${Date.now()}-${safeName}`);
+        await download.saveAs(outPath);
+        session.downloadHistory.push({
+          path: outPath,
+          suggestedFilename: suggested,
+          url: download.url?.() || "",
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        session.downloadHistory.push({
+          path: "",
+          suggestedFilename: "",
+          url: download.url?.() || "",
+          timestamp: new Date().toISOString(),
+          error: error instanceof Error ? error.message : String(error || "Unknown download error")
+        });
+      }
+    });
+
     this.sessions.set(effectiveSessionId, session);
     this.logAction(session, {
       action: "session.create",
       result: "success",
-      retryCount: 0,
-      metadata: { headless }
+      metadata: { headless, persist }
     });
     return session;
   }
@@ -102,11 +183,9 @@ class BrowserService {
     session.currentUrl = session.page.url();
   }
 
-  getSnapshotFingerprint(snapshot) {
-    const title = snapshot.title || "";
-    const url = snapshot.url || "";
-    const countSignature = `${snapshot.counts?.buttons || 0}-${snapshot.counts?.inputs || 0}-${snapshot.counts?.forms || 0}-${snapshot.counts?.links || 0}`;
-    return `${title}|${url}|${countSignature}`;
+  appendScratchpad(session, note) {
+    const timestamp = new Date().toISOString().slice(11, 19);
+    session.scratchpad += `[${timestamp}] ${note}\n`;
   }
 
   async withRetry(fn, retries = config.maxRetries) {
@@ -127,6 +206,51 @@ class BrowserService {
       .replace(/[^\w\s-]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  async injectInteractionMonitor(session) {
+    try {
+      await session.page.exposeFunction("__mcpManualInteraction", () => {
+        agentActivityService.notifyManualInteraction(session.id);
+        this.appendScratchpad(session, "⚠ Manual user interaction detected");
+      });
+
+      await session.page.addInitScript(() => {
+        window.__mcpAgentActive = false;
+        let lastNotify = 0;
+        const notify = () => {
+          if (window.__mcpAgentActive) return;
+          const now = Date.now();
+          if (now - lastNotify > 2000 && window.__mcpManualInteraction) {
+            lastNotify = now;
+            window.__mcpManualInteraction();
+          }
+        };
+        window.addEventListener("mousedown", notify, true);
+        window.addEventListener("keydown", notify, true);
+      });
+    } catch (error) {
+      // Silently ignore if already exposed
+    }
+  }
+
+  async setAgentActive(session, active) {
+    try {
+      await session.page.evaluate((v) => { window.__mcpAgentActive = v; }, active);
+    } catch { /* ignore */ }
+  }
+
+  async moveMouseFast(session, x, y) {
+    const steps = 5;
+    const from = session.lastMousePos;
+    for (let i = 1; i <= steps; i += 1) {
+      const t = i / steps;
+      await session.page.mouse.move(
+        from.x + (x - from.x) * t,
+        from.y + (y - from.y) * t
+      );
+    }
+    session.lastMousePos = { x, y };
   }
 
   tokenize(text = "") {
@@ -186,51 +310,51 @@ class BrowserService {
   async isLocatorVisible(locator) {
     const count = await locator.count();
     if (count === 0) return false;
-    const first = locator.first();
-    return first.isVisible();
+    return locator.first().isVisible();
   }
 
   async resolveSelector(session, { selector, query, action }) {
     const page = session.page;
     const candidates = this.buildSelectorCandidates({ selector, query, action });
-    const attempts = [];
 
     for (const candidate of candidates) {
       try {
         const locator = page.locator(candidate.selector);
         const visible = await this.isLocatorVisible(locator);
-        attempts.push({ ...candidate, visible });
         if (visible) {
-          return { selector: candidate.selector, strategy: candidate.strategy, attempts };
+          return { selector: candidate.selector, strategy: candidate.strategy };
         }
-      } catch (error) {
-        attempts.push({ ...candidate, visible: false, error: error.message });
+      } catch {
+        // Skip this candidate
       }
     }
 
-    throw new Error(`Unable to resolve selector/query. Attempts: ${JSON.stringify(attempts)}`);
+    throw new Error(`Unable to resolve selector for: "${query || selector}"`);
   }
 
-  async captureActionScreenshot(session, actionName, phase) {
+  async captureScreenshot(session, label) {
     await fs.mkdir(config.screenshotDir, { recursive: true });
-    const safeAction = actionName.replace(/[^\w-]/g, "_");
-    const fileName = `${Date.now()}-${safeAction}-${phase}.png`;
+    const safeLabel = (label || "shot").replace(/[^\w-]/g, "_");
+    const fileName = `${Date.now()}-${safeLabel}.png`;
     const absolutePath = path.resolve(config.screenshotDir, fileName);
-    await session.page.screenshot({ path: absolutePath, fullPage: true });
-    const record = {
-      action: actionName,
-      phase,
-      path: absolutePath,
-      timestamp: new Date().toISOString(),
-      url: session.page.url()
-    };
-    session.screenshotHistory.push(record);
-    return record;
+    try {
+      await session.page.screenshot({ path: absolutePath, fullPage: false });
+      const record = {
+        label,
+        path: absolutePath,
+        timestamp: new Date().toISOString(),
+        url: session.page.url()
+      };
+      session.screenshotHistory.push(record);
+      return record;
+    } catch (error) {
+      return { label, path: "", error: error.message };
+    }
   }
 
   async analyzePageState(session) {
     return session.page.evaluate(() => {
-      const firstText = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120);
+      const firstText = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80);
       const selectorHint = (el) => {
         if (el.id) return `#${el.id}`;
         if (el.getAttribute("name")) return `[name='${el.getAttribute("name")}']`;
@@ -239,14 +363,14 @@ class BrowserService {
       };
 
       const buttons = Array.from(document.querySelectorAll("button, input[type='button'], input[type='submit'], [role='button']"))
-        .slice(0, 200)
-        .map((el) => ({ text: firstText(el), selector: selectorHint(el), visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) }));
+        .slice(0, 50)
+        .map((el) => ({ text: firstText(el), selector: selectorHint(el), visible: !!(el.offsetWidth || el.offsetHeight) }));
 
       const links = Array.from(document.querySelectorAll("a[href]"))
-        .slice(0, 200)
+        .slice(0, 50)
         .map((el) => ({ text: firstText(el), href: el.getAttribute("href"), selector: selectorHint(el) }));
 
-      const inputElements = Array.from(document.querySelectorAll("input, textarea, select")).slice(0, 200);
+      const inputElements = Array.from(document.querySelectorAll("input, textarea, select")).slice(0, 50);
       const inputs = inputElements.map((el, index) => {
         const id = el.getAttribute("id");
         const label = id ? document.querySelector(`label[for="${id}"]`) : null;
@@ -256,13 +380,12 @@ class BrowserService {
           type: el.getAttribute("type") || el.tagName.toLowerCase(),
           name: el.getAttribute("name") || "",
           placeholder: el.getAttribute("placeholder") || "",
-          ariaLabel: el.getAttribute("aria-label") || "",
           label: label ? firstText(label) : "",
           required: el.hasAttribute("required")
         };
       });
 
-      const forms = Array.from(document.querySelectorAll("form")).slice(0, 100).map((form, index) => ({
+      const forms = Array.from(document.querySelectorAll("form")).slice(0, 20).map((form, index) => ({
         index,
         id: form.id || "",
         method: (form.getAttribute("method") || "get").toLowerCase(),
@@ -271,24 +394,6 @@ class BrowserService {
         buttonCount: form.querySelectorAll("button, input[type='button'], input[type='submit']").length
       }));
 
-      const images = Array.from(document.querySelectorAll("img")).slice(0, 200).map((img) => ({
-        src: img.getAttribute("src") || "",
-        alt: img.getAttribute("alt") || "",
-        width: img.naturalWidth || 0,
-        height: img.naturalHeight || 0,
-        broken: !!img.getAttribute("src") && img.naturalWidth === 0
-      }));
-
-      const interactiveMap = Array.from(document.querySelectorAll("button, a, input, textarea, select, [role='button']"))
-        .slice(0, 300)
-        .map((el, index) => ({
-          index,
-          tag: el.tagName.toLowerCase(),
-          role: el.getAttribute("role") || "",
-          text: firstText(el),
-          selector: selectorHint(el)
-        }));
-
       return {
         title: document.title,
         url: window.location.href,
@@ -296,180 +401,178 @@ class BrowserService {
           buttons: buttons.length,
           links: links.length,
           forms: forms.length,
-          images: images.length,
-          inputs: inputs.length,
-          interactiveElements: interactiveMap.length
+          inputs: inputs.length
         },
         buttons,
         links,
         forms,
-        images,
-        inputs,
-        interactiveMap
+        inputs
       };
     });
   }
 
-  async validateAction(session, beforeState, options = {}) {
-    const afterState = await this.analyzePageState(session);
-    const beforeFingerprint = this.getSnapshotFingerprint(beforeState);
-    const afterFingerprint = this.getSnapshotFingerprint(afterState);
-    const urlChanged = beforeState.url !== afterState.url;
-    const domMutated = beforeFingerprint !== afterFingerprint;
-    const targetVisible = options.expectedSelector
-      ? await session.page.locator(options.expectedSelector).first().isVisible().catch(() => false)
-      : true;
-
-    const success = urlChanged || domMutated || targetVisible;
-    const reason = success
-      ? "Action verified by URL change, DOM mutation, or element visibility"
-      : "No observable change detected after action";
-
+  async openUrl({ sessionId, url, headless, persist }) {
+    const session = await this.getOrCreateSession(sessionId, { headless, persist });
+    await session.page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: config.defaultTimeoutMs
+    });
+    const title = await session.page.title();
+    this.appendScratchpad(session, `Opened: ${url} → "${title}"`);
+    this.logAction(session, { action: "open", selector: url, result: "success", metadata: { url } });
+    session.actionHistory.push({ action: "open", target: url, timestamp: new Date().toISOString() });
     return {
-      success,
-      reason,
-      evidence: {
-        beforeUrl: beforeState.url,
-        afterUrl: afterState.url,
-        urlChanged,
-        domMutated,
-        expectedSelector: options.expectedSelector || "",
-        targetVisible,
-        beforeCounts: beforeState.counts,
-        afterCounts: afterState.counts
-      }
+      sessionId: session.id,
+      url: session.page.url(),
+      title
     };
-  }
-
-  async executeActionWithValidation(session, actionName, executor, options = {}) {
-    const beforeState = await this.analyzePageState(session);
-    const beforeShot = await this.captureActionScreenshot(session, actionName, "before");
-    const result = await executor();
-    const validation = await this.validateAction(session, beforeState, options);
-    const afterShot = await this.captureActionScreenshot(session, actionName, "after");
-    return {
-      ...result,
-      validation,
-      screenshots: {
-        before: beforeShot.path,
-        after: afterShot.path
-      }
-    };
-  }
-
-  async openUrl({ sessionId, url, headless }) {
-    const session = await this.getOrCreateSession(sessionId, { headless });
-    const result = await this.executeActionWithValidation(
-      session,
-      "open",
-      async () => {
-        await session.page.goto(url, {
-          waitUntil: "domcontentloaded",
-          timeout: config.defaultTimeoutMs
-        });
-        return {
-          sessionId: session.id,
-          url: session.page.url(),
-          title: await session.page.title()
-        };
-      }
-    );
-    this.logAction(session, { action: "open", selector: url, result: "success", retryCount: 0, metadata: { url } });
-    session.actionHistory.push({ action: "open", target: url, timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
   }
 
   async click({ sessionId, selector, query }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    let retryCount = 0;
+    await this.setAgentActive(session, true);
     const resolved = await this.resolveSelector(session, { selector, query, action: "click" });
-    const result = await this.executeActionWithValidation(
-      session,
-      "click",
-      async () => {
-        await this.withRetry(async (attempt) => {
-          retryCount = attempt - 1;
-          const locator = session.page.locator(resolved.selector).first();
-          await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-          await locator.hover();
-          await locator.click({ timeout: config.defaultTimeoutMs });
-        });
-        return {
-          sessionId: session.id,
-          selector: resolved.selector,
-          strategy: resolved.strategy,
-          attempts: resolved.attempts
-        };
-      },
-      { expectedSelector: resolved.selector }
-    );
-    this.logAction(session, {
-      action: "click",
+
+    const locator = session.page.locator(resolved.selector).first();
+    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+
+    const box = await locator.boundingBox();
+    if (box) {
+      await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+    }
+
+    await locator.click({ timeout: config.defaultTimeoutMs });
+    await this.setAgentActive(session, false);
+    this.appendScratchpad(session, `Clicked: "${query || selector}" → ${resolved.strategy}`);
+    this.logAction(session, { action: "click", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy } });
+    session.actionHistory.push({ action: "click", target: query || selector, timestamp: new Date().toISOString() });
+
+    return {
+      sessionId: session.id,
       selector: resolved.selector,
-      result: result.validation.success ? "success" : "validation_failed",
-      retryCount,
-      metadata: { query: query || "", strategy: resolved.strategy }
-    });
-    session.actionHistory.push({ action: "click", target: query || selector, selector: resolved.selector, timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
+      strategy: resolved.strategy
+    };
   }
 
   async type({ sessionId, selector, text, query }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    let retryCount = 0;
+    await this.setAgentActive(session, true);
     const resolved = await this.resolveSelector(session, { selector, query, action: "type" });
-    const result = await this.executeActionWithValidation(
-      session,
-      "type",
-      async () => {
-        await this.withRetry(async (attempt) => {
-          retryCount = attempt - 1;
-          const locator = session.page.locator(resolved.selector).first();
-          await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-          await locator.click({ timeout: config.defaultTimeoutMs });
-          await locator.fill("");
-          await locator.type(text, { delay: 30 });
-        });
-        return {
-          sessionId: session.id,
-          selector: resolved.selector,
-          strategy: resolved.strategy,
-          typedLength: text.length,
-          attempts: resolved.attempts
-        };
-      },
-      { expectedSelector: resolved.selector }
-    );
-    this.logAction(session, {
-      action: "type",
+
+    const locator = session.page.locator(resolved.selector).first();
+    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+
+    const box = await locator.boundingBox();
+    if (box) {
+      await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+    }
+
+    await locator.click({ timeout: config.defaultTimeoutMs });
+    await locator.fill("");
+    await locator.fill(String(text));
+    await this.setAgentActive(session, false);
+
+    this.appendScratchpad(session, `Typed into "${query || selector}": "${String(text).slice(0, 30)}..."`);
+    this.logAction(session, { action: "type", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy, textLength: text.length } });
+    session.actionHistory.push({ action: "type", target: query || selector, timestamp: new Date().toISOString() });
+
+    return {
+      sessionId: session.id,
       selector: resolved.selector,
-      result: result.validation.success ? "success" : "validation_failed",
-      retryCount,
-      metadata: { query: query || "", strategy: resolved.strategy, textLength: text.length }
-    });
-    session.actionHistory.push({ action: "type", target: query || selector, selector: resolved.selector, timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
+      strategy: resolved.strategy,
+      typedLength: text.length
+    };
   }
 
-  async screenshot({ sessionId, fileName }) {
+  async fillForm({ sessionId, fields }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    if (!fields || typeof fields !== "object") throw new Error("fields must be an object like { 'email field': 'test@example.com', ... }");
+
+    await this.setAgentActive(session, true);
+    this.appendScratchpad(session, `Filling form with ${Object.keys(fields).length} fields`);
+
+    const results = [];
+    for (const [query, value] of Object.entries(fields)) {
+      try {
+        const resolved = await this.resolveSelector(session, { query, action: "type" });
+        const locator = session.page.locator(resolved.selector).first();
+        await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+
+        const box = await locator.boundingBox();
+        if (box) {
+          await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+        }
+
+        const tagName = await locator.evaluate(el => el.tagName.toLowerCase());
+        const inputType = await locator.evaluate(el => el.getAttribute("type") || "");
+
+        if (tagName === "select") {
+          const options = await locator.evaluate(el => {
+            return Array.from(el.options).map(o => ({ value: o.value, label: o.textContent.trim() }));
+          });
+          const strVal = String(value);
+          const match = options.find(o => o.label.toLowerCase() === strVal.toLowerCase() || o.value.toLowerCase() === strVal.toLowerCase());
+          if (match) {
+            await locator.selectOption({ value: match.value });
+          } else if (options.length > 1) {
+            await locator.selectOption({ index: 1 });
+            this.appendScratchpad(session, `  ⚠ "${query}": "${strVal}" not found in options, picked first available`);
+          } else {
+            throw new Error(`No matching option for "${strVal}". Available: ${options.map(o => o.label).join(", ")}`);
+          }
+        } else if (inputType === "date") {
+          await locator.fill(String(value));
+        } else if (inputType === "checkbox" || inputType === "radio") {
+          const checked = await locator.isChecked();
+          const shouldCheck = ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
+          if (checked !== shouldCheck) await locator.click();
+        } else if (inputType === "file") {
+          await locator.setInputFiles(String(value));
+        } else {
+          await locator.click({ timeout: config.defaultTimeoutMs });
+          await locator.fill("");
+          await locator.fill(String(value));
+        }
+
+        results.push({ field: query, status: "filled", strategy: resolved.strategy });
+        this.appendScratchpad(session, `  ✓ ${query} = "${String(value).slice(0, 20)}"`);
+      } catch (error) {
+        results.push({ field: query, status: "failed", error: error.message });
+        this.appendScratchpad(session, `  ✗ ${query} → FAILED: ${error.message}`);
+      }
+    }
+
+    await this.setAgentActive(session, false);
+    this.logAction(session, { action: "fillForm", result: "success", metadata: { fieldCount: Object.keys(fields).length } });
+    session.actionHistory.push({ action: "fillForm", target: `${Object.keys(fields).length} fields`, timestamp: new Date().toISOString() });
+
+    return {
+      sessionId: session.id,
+      results,
+      filledCount: results.filter(r => r.status === "filled").length,
+      failedCount: results.filter(r => r.status === "failed").length
+    };
+  }
+
+  async screenshot({ sessionId, fileName, fullPage = false }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
 
     await fs.mkdir(config.screenshotDir, { recursive: true });
     const safeName = fileName || `screenshot-${Date.now()}.png`;
     const absolutePath = path.resolve(config.screenshotDir, safeName);
-    await session.page.screenshot({ path: absolutePath, fullPage: true });
+    await session.page.screenshot({ path: absolutePath, fullPage });
     const metadata = {
       sessionId: session.id,
-      action: "manual-screenshot",
       path: absolutePath,
       url: session.page.url(),
       timestamp: new Date().toISOString()
     };
     session.screenshotHistory.push(metadata);
-    this.logAction(session, { action: "screenshot", selector: "", result: "success", retryCount: 0, metadata });
+    this.logAction(session, { action: "screenshot", result: "success", metadata });
     return { sessionId: session.id, path: absolutePath, metadata };
   }
 
@@ -477,48 +580,39 @@ class BrowserService {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
     const summary = await this.analyzePageState(session);
-    this.logAction(session, { action: "analyze", result: "success", retryCount: 0, metadata: { url: summary.url } });
+    this.logAction(session, { action: "analyze", result: "success", metadata: { url: summary.url } });
     return { sessionId: session.id, ...summary };
   }
 
   async scroll({ sessionId, pixels = 600 }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    const result = await this.executeActionWithValidation(
-      session,
-      "scroll",
-      async () => {
-        await session.page.mouse.wheel(0, pixels);
-        return { sessionId: session.id, pixels };
-      }
-    );
-    this.logAction(session, { action: "scroll", result: result.validation.success ? "success" : "validation_failed", retryCount: 0, metadata: { pixels } });
-    session.actionHistory.push({ action: "scroll", target: String(pixels), timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
+    await session.page.mouse.wheel(0, pixels);
+    this.appendScratchpad(session, `Scrolled ${pixels}px`);
+    this.logAction(session, { action: "scroll", result: "success", metadata: { pixels } });
+    session.actionHistory.push({ action: "scroll", target: String(pixels), timestamp: new Date().toISOString() });
+    return { sessionId: session.id, pixels };
   }
 
   async hover({ sessionId, selector, query }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    let retryCount = 0;
     const resolved = await this.resolveSelector(session, { selector, query, action: "hover" });
-    const result = await this.executeActionWithValidation(
-      session,
-      "hover",
-      async () => {
-        await this.withRetry(async (attempt) => {
-          retryCount = attempt - 1;
-          const locator = session.page.locator(resolved.selector).first();
-          await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-          await locator.hover();
-        });
-        return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, attempts: resolved.attempts };
-      },
-      { expectedSelector: resolved.selector }
-    );
-    this.logAction(session, { action: "hover", selector: resolved.selector, result: result.validation.success ? "success" : "validation_failed", retryCount, metadata: { query: query || "" } });
-    session.actionHistory.push({ action: "hover", target: query || selector, selector: resolved.selector, timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
+
+    const locator = session.page.locator(resolved.selector).first();
+    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+
+    const box = await locator.boundingBox();
+    if (box) {
+      await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+    }
+
+    await locator.hover();
+    this.appendScratchpad(session, `Hovered: "${query || selector}"`);
+    this.logAction(session, { action: "hover", selector: resolved.selector, result: "success", metadata: { query } });
+    session.actionHistory.push({ action: "hover", target: query || selector, timestamp: new Date().toISOString() });
+
+    return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy };
   }
 
   async wait({ sessionId, selector, query, text, timeoutMs }) {
@@ -526,82 +620,60 @@ class BrowserService {
     if (!session) throw new Error("Session not found");
     const timeout = Number(timeoutMs || config.defaultTimeoutMs);
 
-    const result = await this.executeActionWithValidation(
-      session,
-      "wait",
-      async () => {
-        if (text) {
-          await session.page.waitForFunction(
-            (needle) => document.body && document.body.innerText.toLowerCase().includes(needle.toLowerCase()),
-            text,
-            { timeout }
-          );
-          return { sessionId: session.id, mode: "text", text, timeoutMs: timeout };
-        }
-        if (selector || query) {
-          const resolved = await this.resolveSelector(session, { selector, query, action: "wait" });
-          await session.page.locator(resolved.selector).first().waitFor({ state: "visible", timeout });
-          return { sessionId: session.id, mode: "selector", selector: resolved.selector, strategy: resolved.strategy, attempts: resolved.attempts, timeoutMs: timeout };
-        }
-        await session.page.waitForTimeout(timeout);
-        return { sessionId: session.id, mode: "timeout", timeoutMs: timeout };
-      }
-    );
-    this.logAction(session, { action: "wait", result: "success", retryCount: 0, metadata: { selector: selector || "", query: query || "", text: text || "", timeoutMs: timeout } });
-    session.actionHistory.push({ action: "wait", target: selector || query || text || String(timeout), timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
+    if (text) {
+      await session.page.waitForFunction(
+        (needle) => document.body && document.body.innerText.toLowerCase().includes(needle.toLowerCase()),
+        text,
+        { timeout }
+      );
+      this.appendScratchpad(session, `Waited for text: "${text}"`);
+      return { sessionId: session.id, mode: "text", text, timeoutMs: timeout };
+    }
+    if (selector || query) {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "wait" });
+      await session.page.locator(resolved.selector).first().waitFor({ state: "visible", timeout });
+      this.appendScratchpad(session, `Waited for element: "${query || selector}"`);
+      return { sessionId: session.id, mode: "selector", selector: resolved.selector, strategy: resolved.strategy, timeoutMs: timeout };
+    }
+    await session.page.waitForTimeout(timeout);
+    this.appendScratchpad(session, `Waited ${timeout}ms`);
+    return { sessionId: session.id, mode: "timeout", timeoutMs: timeout };
   }
 
   async select({ sessionId, selector, query, value, label, index }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
     if (value === undefined && label === undefined && index === undefined) throw new Error("Missing selection target: value, label, or index");
-    let retryCount = 0;
     const resolved = await this.resolveSelector(session, { selector, query, action: "select" });
     const option = value !== undefined ? { value: String(value) } : label !== undefined ? { label: String(label) } : { index: Number(index) };
-    const result = await this.executeActionWithValidation(
-      session,
-      "select",
-      async () => {
-        await this.withRetry(async (attempt) => {
-          retryCount = attempt - 1;
-          const locator = session.page.locator(resolved.selector).first();
-          await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-          await locator.selectOption(option);
-        });
-        return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, option, attempts: resolved.attempts };
-      },
-      { expectedSelector: resolved.selector }
-    );
-    this.logAction(session, { action: "select", selector: resolved.selector, result: result.validation.success ? "success" : "validation_failed", retryCount, metadata: { option } });
-    session.actionHistory.push({ action: "select", target: query || selector, selector: resolved.selector, timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
+
+    const locator = session.page.locator(resolved.selector).first();
+    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+    await locator.selectOption(option);
+
+    this.appendScratchpad(session, `Selected option in "${query || selector}": ${JSON.stringify(option)}`);
+    this.logAction(session, { action: "select", selector: resolved.selector, result: "success", metadata: { option } });
+    session.actionHistory.push({ action: "select", target: query || selector, timestamp: new Date().toISOString() });
+
+    return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, option };
   }
 
   async upload({ sessionId, selector, query, filePath }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
     if (!filePath) throw new Error("Missing required field: filePath");
-    let retryCount = 0;
     const resolved = await this.resolveSelector(session, { selector, query, action: "upload" });
     const absoluteFilePath = path.resolve(filePath);
-    const result = await this.executeActionWithValidation(
-      session,
-      "upload",
-      async () => {
-        await this.withRetry(async (attempt) => {
-          retryCount = attempt - 1;
-          const locator = session.page.locator(resolved.selector).first();
-          await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-          await locator.setInputFiles(absoluteFilePath);
-        });
-        return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, filePath: absoluteFilePath, attempts: resolved.attempts };
-      },
-      { expectedSelector: resolved.selector }
-    );
-    this.logAction(session, { action: "upload", selector: resolved.selector, result: result.validation.success ? "success" : "validation_failed", retryCount, metadata: { filePath: absoluteFilePath } });
-    session.actionHistory.push({ action: "upload", target: query || selector, selector: resolved.selector, timestamp: new Date().toISOString(), validation: result.validation });
-    return result;
+
+    const locator = session.page.locator(resolved.selector).first();
+    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+    await locator.setInputFiles(absoluteFilePath);
+
+    this.appendScratchpad(session, `Uploaded file: "${absoluteFilePath}"`);
+    this.logAction(session, { action: "upload", selector: resolved.selector, result: "success", metadata: { filePath: absoluteFilePath } });
+    session.actionHistory.push({ action: "upload", target: query || selector, timestamp: new Date().toISOString() });
+
+    return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, filePath: absoluteFilePath };
   }
 
   getGoalPlan(goal, payload = {}) {
@@ -652,30 +724,22 @@ class BrowserService {
   async planAndExecute({ sessionId, goal, payload = {} }) {
     const session = await this.getOrCreateSession(sessionId, { headless: payload.headless });
     const plan = this.getGoalPlan(goal, payload);
+    this.appendScratchpad(session, `Planning goal: "${goal}" → ${plan.length} steps`);
+
     const execution = [];
 
     for (const step of plan) {
-      const analyzed = await this.analyzePageState(session);
       try {
         const actionResult = await this.runPlannedAction(session, step);
-        execution.push({
-          step,
-          analyze: { url: analyzed.url, counts: analyzed.counts },
-          status: "success",
-          result: actionResult
-        });
+        execution.push({ step, status: "success", result: actionResult });
       } catch (error) {
-        execution.push({
-          step,
-          analyze: { url: analyzed.url, counts: analyzed.counts },
-          status: "error",
-          error: error.message
-        });
+        execution.push({ step, status: "error", error: error.message });
+        this.appendScratchpad(session, `Plan step failed: ${step.action} → ${error.message}`);
         break;
       }
     }
 
-    this.logAction(session, { action: "planner.execute", result: "success", retryCount: 0, metadata: { goal, stepCount: plan.length } });
+    this.logAction(session, { action: "planner.execute", result: "success", metadata: { goal, stepCount: plan.length } });
     return {
       sessionId: session.id,
       goal,
@@ -693,6 +757,8 @@ class BrowserService {
     if (payload.url) {
       await this.openUrl({ sessionId: session.id, url: payload.url, headless: payload.headless });
     }
+
+    this.appendScratchpad(session, `Executing flow template: "${template}"`);
 
     const results = [];
     for (const step of flow) {
@@ -720,7 +786,7 @@ class BrowserService {
       }
     }
 
-    this.logAction(session, { action: "flow.execute", result: "success", retryCount: 0, metadata: { template, stepCount: flow.length } });
+    this.logAction(session, { action: "flow.execute", result: "success", metadata: { template, stepCount: flow.length } });
     return { sessionId: session.id, template, results, finalUrl: session.page.url() };
   }
 
@@ -753,16 +819,118 @@ class BrowserService {
       currentUrl: session.page.url(),
       lastAction: session.lastAction,
       actionHistory: session.actionHistory,
+      scratchpad: session.scratchpad,
       logs: session.logs,
-      screenshotHistory: session.screenshotHistory
+      screenshotHistory: session.screenshotHistory,
+      downloadHistory: session.downloadHistory
     };
+  }
+
+  async updateScratchpad({ sessionId, content }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    session.scratchpad = content;
+    this.logAction(session, { action: "scratchpad.update", result: "success", metadata: { length: content.length } });
+    return { sessionId: session.id, scratchpad: session.scratchpad };
+  }
+
+  async inspectPage({ sessionId }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const analysis = await this.analyzePageState(session);
+
+    return {
+      sessionId: session.id,
+      url: session.page.url(),
+      title: await session.page.title(),
+      analysis,
+      consoleErrors: session.consoleErrors.slice(-10),
+      networkErrors: session.networkErrors.slice(-10),
+      scratchpad: session.scratchpad
+    };
+  }
+
+  async testPageQuality({ sessionId }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const qualityResult = await session.page.evaluate(() => {
+      const brokenImages = Array.from(document.querySelectorAll("img")).filter(img => img.naturalWidth === 0 && img.src).map(img => img.src);
+      const missingAlt = Array.from(document.querySelectorAll("img")).filter(img => !img.alt).map(img => img.src).slice(0, 10);
+      const interactiveElements = document.querySelectorAll("button, a, input, select, textarea").length;
+      const h1 = document.querySelector("h1")?.innerText || "No H1 found";
+      const meta = document.querySelector('meta[name="description"]')?.content || "No meta description";
+
+      return {
+        brokenImages,
+        missingAlt,
+        interactiveElementsCount: interactiveElements,
+        h1,
+        metaDescription: meta
+      };
+    });
+
+    const report = {
+      sessionId: session.id,
+      url: session.page.url(),
+      timestamp: new Date().toISOString(),
+      quality: qualityResult,
+      consoleErrors: session.consoleErrors.slice(-5),
+      networkErrors: session.networkErrors.slice(-5),
+      consoleErrorCount: session.consoleErrors.length,
+      networkErrorCount: session.networkErrors.length,
+      isHealthy: qualityResult.brokenImages.length === 0 && session.consoleErrors.length === 0 && session.networkErrors.length === 0
+    };
+
+    this.appendScratchpad(session, `Quality test: ${report.isHealthy ? "HEALTHY ✓" : "ISSUES FOUND ✗"} (${report.consoleErrorCount} console, ${report.networkErrorCount} network errors)`);
+    this.logAction(session, { action: "test.quality", result: report.isHealthy ? "success" : "issues_found" });
+    return report;
+  }
+
+  async captureLinkRoutes({ sessionId, maxRoutes = 5 }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const links = await session.page.evaluate(() => {
+      const currentOrigin = window.location.origin;
+      return Array.from(new Set(
+        Array.from(document.querySelectorAll("a[href]"))
+          .map(a => a.href)
+          .filter(href => href.startsWith(currentOrigin) && !href.includes("#"))
+      ));
+    });
+
+    const routesToCapture = links.slice(0, maxRoutes);
+    const captures = [];
+    const originalUrl = session.page.url();
+    this.appendScratchpad(session, `Capturing ${routesToCapture.length} routes`);
+
+    for (const link of routesToCapture) {
+      try {
+        await session.page.goto(link, { waitUntil: "domcontentloaded", timeout: 8000 });
+        const shot = await this.captureScreenshot(session, `route`);
+        const errors = session.consoleErrors.length;
+        captures.push({ url: link, screenshot: shot.path, consoleErrors: errors });
+        this.appendScratchpad(session, `  ✓ ${link}`);
+      } catch (err) {
+        captures.push({ url: link, error: err.message });
+        this.appendScratchpad(session, `  ✗ ${link} → ${err.message}`);
+      }
+    }
+
+    await session.page.goto(originalUrl, { waitUntil: "domcontentloaded" });
+
+    return { sessionId: session.id, totalLinksFound: links.length, captures };
   }
 
   async closeSession({ sessionId }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
     await session.context.close();
-    await session.browser.close();
+    if (session.browser) {
+      await session.browser.close();
+    }
     this.sessions.delete(sessionId);
     return { sessionId };
   }

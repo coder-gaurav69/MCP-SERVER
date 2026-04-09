@@ -2,11 +2,13 @@
   "mcpServers": {
     "user-browser-automation-mcp-server": {
       "command": "node",
-      "args": ["./src/mcpServer.js"],
+      "args": [
+        "./src/mcpServer.js"
+      ],
       "cwd": "C:/Users/Gaurav/Desktop/MCP SERVER/MCP-SERVER",
       "env": {
-        "HEADLESS": "true",
-        "DEFAULT_TIMEOUT_MS": "10000",
+        "HEADLESS": "false",
+        "DEFAULT_TIMEOUT_MS": "20000",
         "MAX_RETRIES": "3",
         "SCREENSHOT_DIR": "screenshots"
       }

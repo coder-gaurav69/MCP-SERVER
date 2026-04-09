@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 const toBoolean = (value, fallback = true) => {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
@@ -8,8 +10,9 @@ const toBoolean = (value, fallback = true) => {
 };
 
 export const config = {
+  host: process.env.HOST || "127.0.0.1",
   port: Number(process.env.PORT || 3000),
-  defaultHeadless: toBoolean(process.env.HEADLESS, true),
+  defaultHeadless: toBoolean(process.env.HEADLESS, false),
   defaultTimeoutMs: Number(process.env.DEFAULT_TIMEOUT_MS || 10000),
   maxRetries: Number(process.env.MAX_RETRIES || 3),
   screenshotDir: process.env.SCREENSHOT_DIR || "screenshots"

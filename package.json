@@ -12,6 +12,8 @@
     "node": ">=18.18.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.19.1",
+    "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "morgan": "^1.10.0",
     "playwright": "^1.52.0",

@@ -40,6 +40,15 @@ class AgentActivityService {
     this.lastUpdatedAt = new Date().toISOString();
     this.broadcast("agent.activity", this.getState());
   }
+  
+  notifyManualInteraction(sessionId) {
+    this.broadcast("agent.alert", {
+      type: "manual_interaction",
+      message: "Manual interaction detected. Agent automation may be affected.",
+      sessionId,
+      timestamp: new Date().toISOString()
+    });
+  }
 
   addClient(res) {
     this.clients.add(res);
