@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "browser-automation-mcp-server": {
+      "command": "node",
+      "args": ["src/server.js"],
+      "cwd": ".",
+      "env": {
+        "PORT": "3000",
+        "HEADLESS": "true",
+        "DEFAULT_TIMEOUT_MS": "10000",
+        "MAX_RETRIES": "3",
+        "SCREENSHOT_DIR": "screenshots"
+      }
+    }
+  }
+}

@@ -1,0 +1,495 @@
+{
+    "status":  "success",
+    "action":  "analyze",
+    "data":  {
+                 "sessionId":  "e95ae5fb-d95e-41c7-8062-03e79d69e90d",
+                 "title":  "Dashboard | ES3 Minerals",
+                 "url":  "http://localhost:5173/",
+                 "counts":  {
+                                "buttons":  100,
+                                "links":  4,
+                                "forms":  0,
+                                "images":  9
+                            },
+                 "buttons":  [
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Reset Layout",
+                                     "selector":  "button.gl-restore-chip"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.gl-custom-popout-btn"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.p-2"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.p-2"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.p-2"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.p-2"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.gl-custom-popout-btn"
+                                 },
+                                 {
+                                     "text":  "Staff\nUnassigned",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Edit",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Edit",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Lease",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Production",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Wells",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "DUCs/Permits",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Price",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Actions",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Lease Hist.",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "NVL Hist.",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Show all notes",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Tract Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.gl-custom-popout-btn"
+                                 },
+                                 {
+                                     "text":  "Add Owner to Campaign",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "View all contacts",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "DNC",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Ryan Tunnell",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.absolute"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "BO to PO Oil Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "BO to PO Gas Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "View all contacts",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Mark DNC",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Robert Walker",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.absolute"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "BO to PO Oil Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "BO to PO Gas Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "View all contacts",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Mark DNC",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Robert Walker",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.absolute"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "BO to PO Oil Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "BO to PO Gas Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "View all contacts",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Mark DNC",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Douglas Hallam",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.absolute"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "BO to PO Oil Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "BO to PO Gas Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "View all contacts",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Mark DNC",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "Unassigned",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.absolute"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "BO to PO Oil Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "BO to PO Gas Chart",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "Add Note",
+                                     "selector":  "button.flex"
+                                 },
+                                 {
+                                     "text":  "",
+                                     "selector":  "button.mt-0.5"
+                                 },
+                                 {
+                                     "text":  "View all contacts",
+                                     "selector":  "button.inline-flex"
+                                 },
+                                 {
+                                     "text":  "DNC",
+                                     "selector":  "button.inline-flex"
+                                 }
+                             ],
+                 "links":  [
+                               {
+                                   "text":  "+",
+                                   "href":  "#"
+                               },
+                               {
+                                   "text":  "-",
+                                   "href":  "#"
+                               },
+                               {
+                                   "text":  "Leaflet",
+                                   "href":  "https://leafletjs.com"
+                               },
+                               {
+                                   "text":  "OpenStreetMap",
+                                   "href":  "https://www.openstreetmap.org/copyright"
+                               }
+                           ],
+                 "forms":  [
+
+                           ],
+                 "images":  [
+                                {
+                                    "src":  "/src/assets/es3-logo.webp",
+                                    "alt":  "ES3 Minerals",
+                                    "width":  473,
+                                    "height":  192
+                                },
+                                {
+                                    "src":  "https://a.tile.openstreetmap.org/10/222/414.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                },
+                                {
+                                    "src":  "https://b.tile.openstreetmap.org/10/223/414.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                },
+                                {
+                                    "src":  "https://b.tile.openstreetmap.org/10/222/415.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                },
+                                {
+                                    "src":  "https://c.tile.openstreetmap.org/10/223/415.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                },
+                                {
+                                    "src":  "https://c.tile.openstreetmap.org/10/221/414.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                },
+                                {
+                                    "src":  "https://c.tile.openstreetmap.org/10/224/414.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                },
+                                {
+                                    "src":  "https://a.tile.openstreetmap.org/10/221/415.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                },
+                                {
+                                    "src":  "https://a.tile.openstreetmap.org/10/224/415.png",
+                                    "alt":  "",
+                                    "width":  256,
+                                    "height":  256
+                                }
+                            ]
+             },
+    "error":  ""
+}

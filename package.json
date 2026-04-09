@@ -1,0 +1,20 @@
+{
+  "name": "browser-automation-mcp-server",
+  "version": "1.0.0",
+  "description": "Production-ready MCP-style browser automation server using Express and Playwright",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "morgan": "^1.10.0",
+    "playwright": "^1.52.0",
+    "uuid": "^11.1.0"
+  }
+}
