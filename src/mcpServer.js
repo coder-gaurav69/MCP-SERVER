@@ -69,9 +69,12 @@ tool(
 
 tool(
   "browser_close_session",
-  "Close a session and its browser.",
-  { sessionId: z.string() },
-  ({ sessionId }) => browserService.closeSession({ sessionId })
+  "Close a session and its browser. Set cleanup=true to delete all screenshots, downloads, and user data for this session.",
+  { 
+    sessionId: z.string(),
+    cleanup: z.boolean().optional()
+  },
+  ({ sessionId, cleanup }) => browserService.closeSession({ sessionId, cleanup })
 );
 
 tool("browser_sessions", "List all active browser sessions.", {}, () => browserService.getSessions());
@@ -240,8 +243,18 @@ tool(
 );
 
 tool(
+  "browser_auto_explore",
+  "Intelligently explore the site by interacting with navigation menus/dropdowns to discover 'Real' routes. Captures screenshots of each discovered page.",
+  {
+    sessionId: z.string(),
+    maxRoutes: z.number().optional()
+  },
+  ({ sessionId, maxRoutes }) => browserService.autoExplore({ sessionId, maxRoutes })
+);
+
+tool(
   "browser_capture_links",
-  "Navigate to internal link routes and capture screenshots of each. Returns to original page after.",
+  "DEPRECATED: Use browser_auto_explore instead for better results. Navigate to internal link routes and capture screenshots.",
   {
     sessionId: z.string(),
     maxRoutes: z.number().optional()

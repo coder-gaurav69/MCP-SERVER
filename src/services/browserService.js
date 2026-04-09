@@ -35,14 +35,23 @@ class BrowserService {
     }
 
     const effectiveSessionId = sessionId || uuidv4();
-    const headless = options.headless ?? config.defaultHeadless;
+    const headless =
+      typeof options.headless === "boolean" ? options.headless : config.defaultHeadless;
     const persist = options.persist ?? false;
     const userDataDir = persist ? path.resolve("user_data", effectiveSessionId) : null;
-    // In headed mode, let the OS window size drive the viewport so Chromium can truly maximize.
-    // A fixed Playwright viewport (e.g. 1920x1080) can make the app appear "not fully visible"
-    // on Windows due to DPI scaling and non-maximized window bounds.
-    const viewport = headless ? { width: 1920, height: 1080 } : null;
-    const deviceScaleFactor = viewport ? 1 : undefined;
+    
+    // Standard resolutions
+    const width = config.defaultViewport.width;
+    const height = config.defaultViewport.height;
+    const scaleFactor = config.browserScaleFactor === null ? null : Number(config.browserScaleFactor);
+    const browserChannel = String(config.browserChannel || "").trim();
+
+    // IMPORTANT (Windows): in headed mode, using `viewport: null` makes the viewport follow
+    // the real OS window size, preventing "missing/cut off" UI due to responsive breakpoints.
+    // Playwright: launchPersistentContext rejects pairing `deviceScaleFactor` with `viewport: null`;
+    // use a fixed viewport for headed persistent sessions.
+    const viewport = headless ? { width, height } : persist ? { width, height } : null;
+    const deviceScaleFactor = headless ? 1 : undefined;
 
     if (persist) {
       await fs.mkdir(userDataDir, { recursive: true });
@@ -52,31 +61,69 @@ class BrowserService {
     let context;
     let page;
 
+    const launchArgs = [
+      "--disable-blink-features=AutomationControlled",
+      `--window-size=${width},${height}`,
+      "--start-maximized",
+      "--disable-features=CalculateNativeWinOcclusion",
+      // Stealth & UI Perfection
+      "--disable-infobars",
+      "--disable-session-crashed-bubble",
+      "--disable-background-networking",
+      "--disable-default-apps",
+      "--disable-extensions",
+      "--no-default-browser-check",
+      // In headed mode we avoid forcing scale; let OS scaling behave like a normal browser.
+      ...(headless && Number.isFinite(scaleFactor) && scaleFactor > 0
+        ? [`--force-device-scale-factor=${scaleFactor}`]
+        : [])
+    ];
+
+    const realUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
+    const launchOptsBase = {
+      headless,
+      args: launchArgs,
+      ignoreDefaultArgs: config.stealthMode ? ["--enable-automation"] : [],
+      ...(browserChannel ? { channel: browserChannel } : {})
+    };
+
     if (persist) {
-      context = await chromium.launchPersistentContext(userDataDir, {
-        headless,
-        viewport,
-        ...(deviceScaleFactor ? { deviceScaleFactor } : {}),
-        args: [
-          "--disable-blink-features=AutomationControlled",
-          "--start-maximized"
-        ]
-      });
+      try {
+        context = await chromium.launchPersistentContext(userDataDir, {
+          ...launchOptsBase,
+          viewport,
+          userAgent: config.stealthMode ? realUserAgent : undefined,
+          ...(deviceScaleFactor ? { deviceScaleFactor } : {})
+        });
+      } catch (e) {
+        // If requested channel isn't available, fall back to bundled Chromium.
+        context = await chromium.launchPersistentContext(userDataDir, {
+          headless,
+          args: launchArgs,
+          viewport,
+          ...(deviceScaleFactor ? { deviceScaleFactor } : {})
+        });
+      }
       page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     } else {
-      browser = await chromium.launch({
-        headless,
-        args: [
-          "--disable-blink-features=AutomationControlled",
-          "--start-maximized"
-        ]
-      });
+      try {
+        browser = await chromium.launch(launchOptsBase);
+      } catch (e) {
+        browser = await chromium.launch({ headless, args: launchArgs });
+      }
       context = await browser.newContext({
         viewport,
+        userAgent: config.stealthMode ? realUserAgent : undefined,
+        ...(headless ? { screen: { width, height } } : {}),
         ...(deviceScaleFactor ? { deviceScaleFactor } : {})
       });
       page = await context.newPage();
     }
+
+    // NOTE: In headed mode we intentionally do NOT call page.setViewportSize().
+    // When viewport=null, Playwright binds viewport to the OS window. Forcing a viewport
+    // can reintroduce clipping/scroll issues on Windows scaling setups.
 
     const session = {
       id: effectiveSessionId,
@@ -95,6 +142,7 @@ class BrowserService {
       currentUrl: "about:blank",
       createdAt: new Date().toISOString(),
       isPersisted: persist,
+      userDataDir: userDataDir,
       lastMousePos: { x: 960, y: 540 }
     };
 
@@ -133,10 +181,10 @@ class BrowserService {
 
     page.on("download", async (download) => {
       try {
-        await fs.mkdir("downloads", { recursive: true });
+        await fs.mkdir(config.downloadsDir, { recursive: true });
         const suggested = download.suggestedFilename?.() || `download-${Date.now()}`;
         const safeName = suggested.replace(/[^\w.\-() ]/g, "_");
-        const outPath = path.resolve("downloads", `${Date.now()}-${safeName}`);
+        const outPath = path.resolve(config.downloadsDir, `${Date.now()}-${safeName}`);
         await download.saveAs(outPath);
         session.downloadHistory.push({
           path: outPath,
@@ -234,24 +282,98 @@ class BrowserService {
     }
   }
 
+  async injectVisualFeedback(session) {
+    try {
+      await session.page.addStyleTag({
+        content: `
+          @keyframes mcp-ripple {
+            0% { transform: scale(0); opacity: 0.8; }
+            100% { transform: scale(4); opacity: 0; }
+          }
+          .mcp-ripple-container {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 999999;
+          }
+          .mcp-ripple {
+            position: absolute;
+            width: 50px; height: 50px;
+            background: rgba(255, 0, 0, 0.4);
+            border-radius: 50%;
+            border: 2px solid rgba(255,0,0,0.8);
+            transform-origin: center;
+            animation: mcp-ripple 0.6s ease-out forwards;
+            pointer-events: none;
+          }
+        `
+      });
+
+      await session.page.evaluate(() => {
+        if (!document.getElementById('mcp-ripple-container')) {
+          const div = document.createElement('div');
+          div.id = 'mcp-ripple-container';
+          div.className = 'mcp-ripple-container';
+          document.body.appendChild(div);
+        }
+      });
+    } catch { /* ignore */ }
+  }
+
+  async showRipple(session, x, y) {
+    try {
+      await session.page.evaluate(({ x, y }) => {
+        const container = document.getElementById('mcp-ripple-container');
+        if (!container) return;
+        const ripple = document.createElement('div');
+        ripple.className = 'mcp-ripple';
+        ripple.style.left = `${x - 25}px`;
+        ripple.style.top = `${y - 25}px`;
+        container.appendChild(ripple);
+        setTimeout(() => ripple.remove(), 700);
+      }, { x, y });
+    } catch { /* ignore */ }
+  }
+
+  async moveMouseNatural(session, { x, y }) {
+    const from = session.lastMousePos || { x: 0, y: 0 };
+    const distance = Math.sqrt(Math.pow(x - from.x, 2) + Math.pow(y - from.y, 2));
+    
+    if (distance < 5) return;
+
+    const steps = Math.min(Math.max(Math.floor(distance / 15), 5), 20);
+    
+    // Simple quadratic Bezier control point for a slight curve
+    const control = {
+      x: (from.x + x) / 2 + (Math.random() - 0.5) * distance * 0.3,
+      y: (from.y + y) / 2 + (Math.random() - 0.5) * distance * 0.3
+    };
+
+    const getBezier = (t, p0, p1, p2) => (1 - t) * (1 - t) * p0 + 2 * (1 - t) * t * p1 + t * t * p2;
+
+    for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const curX = getBezier(t, from.x, control.x, x);
+        const curY = getBezier(t, from.y, control.y, y);
+        await session.page.mouse.move(curX, curY);
+        if (i % 2 === 0) await new Promise(r => setTimeout(r, 5)); // Micro-jitter
+    }
+    
+    session.lastMousePos = { x, y };
+  }
+
+  async waitForSettle(session, timeout = 500) {
+    try {
+      await session.page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, timeout));
+    } catch { /* ignore */ }
+  }
+
   async setAgentActive(session, active) {
     try {
       await session.page.evaluate((v) => { window.__mcpAgentActive = v; }, active);
     } catch { /* ignore */ }
   }
 
-  async moveMouseFast(session, x, y) {
-    const steps = 5;
-    const from = session.lastMousePos;
-    for (let i = 1; i <= steps; i += 1) {
-      const t = i / steps;
-      await session.page.mouse.move(
-        from.x + (x - from.x) * t,
-        from.y + (y - from.y) * t
-      );
-    }
-    session.lastMousePos = { x, y };
-  }
 
   tokenize(text = "") {
     const stopWords = new Set(["click", "type", "into", "in", "on", "the", "a", "an", "button", "field", "input", "to", "select"]);
@@ -356,8 +478,10 @@ class BrowserService {
     return session.page.evaluate(() => {
       const firstText = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80);
       const selectorHint = (el) => {
-        if (el.id) return `#${el.id}`;
-        if (el.getAttribute("name")) return `[name='${el.getAttribute("name")}']`;
+        // IMPORTANT: Many frameworks generate IDs with ":" (e.g. "#:r11:") which are not valid in a raw CSS id selector
+        // without escaping. Use an attribute selector to keep the hint copy-pastable into Playwright/CSS locators.
+        if (el.id) return `[id="${String(el.id).replace(/"/g, '\\"')}"]`;
+        if (el.getAttribute("name")) return `[name='${String(el.getAttribute("name")).replace(/'/g, "\\'")}']`;
         if (el.className && typeof el.className === "string") return `${el.tagName.toLowerCase()}.${el.className.trim().split(/\s+/)[0]}`;
         return el.tagName.toLowerCase();
       };
@@ -439,10 +563,16 @@ class BrowserService {
 
     const box = await locator.boundingBox();
     if (box) {
-      await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+      const centerX = box.x + box.width / 2;
+      const centerY = box.y + box.height / 2;
+      await this.moveMouseNatural(session, { x: centerX, y: centerY });
+      await this.showRipple(session, centerX, centerY);
+      // Small pause after ripple starts but before click for realism
+      await new Promise(r => setTimeout(r, 100));
     }
 
     await locator.click({ timeout: config.defaultTimeoutMs });
+    await this.waitForSettle(session);
     await this.setAgentActive(session, false);
     this.appendScratchpad(session, `Clicked: "${query || selector}" → ${resolved.strategy}`);
     this.logAction(session, { action: "click", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy } });
@@ -466,12 +596,16 @@ class BrowserService {
 
     const box = await locator.boundingBox();
     if (box) {
-      await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+      const centerX = box.x + box.width / 2;
+      const centerY = box.y + box.height / 2;
+      await this.moveMouseNatural(session, { x: centerX, y: centerY });
+      await this.showRipple(session, centerX, centerY);
     }
 
     await locator.click({ timeout: config.defaultTimeoutMs });
     await locator.fill("");
     await locator.fill(String(text));
+    await this.waitForSettle(session);
     await this.setAgentActive(session, false);
 
     this.appendScratchpad(session, `Typed into "${query || selector}": "${String(text).slice(0, 30)}..."`);
@@ -503,7 +637,10 @@ class BrowserService {
 
         const box = await locator.boundingBox();
         if (box) {
-          await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+          const centerX = box.x + box.width / 2;
+          const centerY = box.y + box.height / 2;
+          await this.moveMouseNatural(session, { x: centerX, y: centerY });
+          await this.showRipple(session, centerX, centerY);
         }
 
         const tagName = await locator.evaluate(el => el.tagName.toLowerCase());
@@ -533,6 +670,7 @@ class BrowserService {
           await locator.setInputFiles(String(value));
         } else {
           await locator.click({ timeout: config.defaultTimeoutMs });
+          await this.waitForSettle(session, 100);
           await locator.fill("");
           await locator.fill(String(value));
         }
@@ -604,7 +742,10 @@ class BrowserService {
 
     const box = await locator.boundingBox();
     if (box) {
-      await this.moveMouseFast(session, box.x + box.width / 2, box.y + box.height / 2);
+      const centerX = box.x + box.width / 2;
+      const centerY = box.y + box.height / 2;
+      await this.moveMouseNatural(session, { x: centerX, y: centerY });
+      await this.showRipple(session, centerX, centerY);
     }
 
     await locator.hover();
@@ -649,7 +790,17 @@ class BrowserService {
 
     const locator = session.page.locator(resolved.selector).first();
     await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+
+    const box = await locator.boundingBox();
+    if (box) {
+      const centerX = box.x + box.width / 2;
+      const centerY = box.y + box.height / 2;
+      await this.moveMouseNatural(session, { x: centerX, y: centerY });
+      await this.showRipple(session, centerX, centerY);
+    }
+
     await locator.selectOption(option);
+    await this.waitForSettle(session);
 
     this.appendScratchpad(session, `Selected option in "${query || selector}": ${JSON.stringify(option)}`);
     this.logAction(session, { action: "select", selector: resolved.selector, result: "success", metadata: { option } });
@@ -924,15 +1075,156 @@ class BrowserService {
     return { sessionId: session.id, totalLinksFound: links.length, captures };
   }
 
-  async closeSession({ sessionId }) {
+  async discoverUIRoutes(session) {
+    this.appendScratchpad(session, "Discovering routes via UI interaction...");
+    
+    const results = await session.page.evaluate(async () => {
+      const discovered = new Set();
+      const hubs = [];
+
+      // 1. Identify navigation containers
+      const navContainers = Array.from(document.querySelectorAll('nav, header, aside, [role="navigation"], .navbar, .sidebar, .menu'));
+      
+      // 2. Find "Interactive Hubs" (menus, dropdowns)
+      const interactives = Array.from(document.querySelectorAll('button, [role="button"], a')).filter(el => {
+        const text = (el.innerText || "").toLowerCase();
+        const hasCaret = text.includes('⌄') || text.includes('v') || text.includes('arrow') || text.includes('menu');
+        const isNav = navContainers.some(nav => nav.contains(el));
+        return isNav && (hasCaret || el.querySelector('svg') || el.className.toLowerCase().includes('dropdown'));
+      });
+
+      const wait = (ms) => new Promise(res => setTimeout(res, ms));
+
+      // 3. For each hub, click/hover and see what appears
+      for (const el of interactives.slice(0, 10)) {
+        try {
+          el.scrollIntoView();
+          el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+          el.click();
+          await wait(500);
+          
+          // Scrape newly visible links
+          Array.from(document.querySelectorAll('a[href]')).forEach(a => {
+            if (a.offsetParent !== null) { // effectively visible
+               discovered.add({ title: a.innerText.trim(), href: a.href });
+            }
+          });
+        } catch (e) { /* ignore */ }
+      }
+
+      // 4. Also get all currently visible links in nav containers
+      navContainers.forEach(nav => {
+        Array.from(nav.querySelectorAll('a[href]')).forEach(a => {
+          discovered.add({ title: a.innerText.trim(), href: a.href });
+        });
+      });
+
+      return Array.from(discovered);
+    });
+
+    const currentOrigin = await session.page.evaluate(() => window.location.origin);
+    const internalRoutes = results
+      .filter(r => r.href.startsWith(currentOrigin) && !r.href.includes('#'))
+      .map(r => ({ ...r, path: r.href.replace(currentOrigin, '') }));
+
+    return internalRoutes;
+  }
+
+  async autoExplore({ sessionId, maxRoutes = 10 }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
+
+    const routes = await this.discoverUIRoutes(session);
+    this.appendScratchpad(session, `Found ${routes.length} potential routes via UI.`);
+
+    const captures = [];
+    const originalUrl = session.page.url();
+    
+    // De-duplicate by path
+    const uniqueRoutes = [];
+    const seenPaths = new Set();
+    for (const r of routes) {
+      if (!seenPaths.has(r.path)) {
+        seenPaths.add(r.path);
+        uniqueRoutes.push(r);
+      }
+    }
+
+    const routesToVisit = uniqueRoutes.slice(0, maxRoutes);
+    this.appendScratchpad(session, `Visiting ${routesToVisit.length} unique routes...`);
+
+    for (const route of routesToVisit) {
+      try {
+        await session.page.goto(route.href, { waitUntil: "domcontentloaded", timeout: 8000 });
+        const shot = await this.captureScreenshot(session, `explore_${route.title || 'page'}`);
+        captures.push({ 
+          title: route.title, 
+          url: route.href, 
+          path: route.path,
+          screenshot: shot.path 
+        });
+        this.appendScratchpad(session, `  ✓ Visited: ${route.title || route.path}`);
+      } catch (err) {
+        captures.push({ title: route.title, url: route.href, error: err.message });
+        this.appendScratchpad(session, `  ✗ Failed: ${route.title || route.path} → ${err.message}`);
+      }
+    }
+
+    // Return to original page
+    try {
+      await session.page.goto(originalUrl, { waitUntil: "domcontentloaded" });
+    } catch { /* ignore */ }
+
+    return { 
+      sessionId: session.id, 
+      totalDiscovered: routes.length, 
+      visitedCount: captures.length,
+      captures 
+    };
+  }
+
+  async cleanupSession(session) {
+    this.appendScratchpad(session, "Cleaning up session artifacts...");
+    
+    // 1. Screenshots
+    for (const record of session.screenshotHistory) {
+      if (record.path) {
+        try { await fs.unlink(record.path); } catch { /* ignore */ }
+      }
+    }
+
+    // 2. Downloads
+    for (const record of session.downloadHistory) {
+      if (record.path) {
+        try { await fs.unlink(record.path); } catch { /* ignore */ }
+      }
+    }
+
+    // 3. User Data Dir
+    if (session.userDataDir) {
+      try {
+        await fs.rm(session.userDataDir, { recursive: true, force: true });
+      } catch { /* ignore */ }
+    }
+  }
+
+  async closeSession({ sessionId, cleanup = null }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const shouldCleanup = cleanup !== null ? cleanup : config.autoCleanup;
+
     await session.context.close();
     if (session.browser) {
       await session.browser.close();
     }
+
+    if (shouldCleanup) {
+      await this.cleanupSession(session);
+    }
+
     this.sessions.delete(sessionId);
-    return { sessionId };
+    return { sessionId, cleanedUp: !!shouldCleanup };
   }
 
   async closeAll() {
