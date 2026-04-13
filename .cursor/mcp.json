@@ -2,16 +2,41 @@
   "mcpServers": {
     "user-browser-automation-mcp-server": {
       "command": "node",
-      "args": [
-        "./src/mcpServer.js"
-      ],
+      "args": ["./src/mcpServer.js"],
       "cwd": "C:/Users/Gaurav/Desktop/MCP SERVER/MCP-SERVER",
       "env": {
-        "HEADLESS": "false",
-        "DEFAULT_TIMEOUT_MS": "20000",
+        "HEADLESS": "true",
+        "DEFAULT_TIMEOUT_MS": "10000",
         "MAX_RETRIES": "3",
-        "SCREENSHOT_DIR": "screenshots"
-      }
+        "SCREENSHOT_DIR": "screenshots",
+        "SESSION_SCREENSHOT_SUBDIRS": "true"
+      },
+      "alwaysAllow": [
+        "browser_analyze",
+        "browser_auto_explore",
+        "browser_capture_links",
+        "browser_click",
+        "browser_close_session",
+        "browser_element_styles",
+        "browser_errors",
+        "browser_fill_form",
+        "browser_flow",
+        "browser_hover",
+        "browser_inspect",
+        "browser_open",
+        "browser_page_style_map",
+        "browser_plan",
+        "browser_screenshot",
+        "browser_scroll",
+        "browser_select",
+        "browser_sessions",
+        "browser_state",
+        "browser_test_page",
+        "browser_type",
+        "browser_update_scratchpad",
+        "browser_upload",
+        "browser_wait"
+      ]
     }
   }
 }

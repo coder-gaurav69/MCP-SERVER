@@ -1,15 +1,46 @@
 {
-  "name": "browser-automation-mcp-server",
+  "name": "mcp-server-manager",
+  "displayName": "MCP Server Manager",
+  "description": "Automatically starts and manages an MCP server",
   "version": "1.0.0",
-  "description": "Production-ready MCP-style browser automation server using Express and Playwright",
   "type": "module",
-  "main": "src/server.js",
-  "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
-  },
+  "publisher": "gaurav",
   "engines": {
-    "node": ">=18.18.0"
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mcp-manager.copyCopilotConfig",
+        "title": "MCP: Copy Copilot Config"
+      }
+    ],
+    "configuration": {
+      "title": "MCP Server",
+      "properties": {
+        "mcp.serverPath": {
+          "type": "string",
+          "default": "C:/mcp-server/server.js",
+          "description": "Path to the Node.js MCP server file."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "mcp": "node ./src/mcpServer.js",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.19.1",
@@ -18,5 +49,10 @@
     "morgan": "^1.10.0",
     "playwright": "^1.52.0",
     "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "20.x",
+    "typescript": "^5.3.3"
   }
 }

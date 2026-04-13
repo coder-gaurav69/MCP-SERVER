@@ -76,6 +76,21 @@ router.get("/capture_links", async (req, res) => {
   }
 });
 
+router.get("/auto_explore", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    const maxRoutes = req.query.maxRoutes ? Number(req.query.maxRoutes) : undefined;
+    const navigateByClick = ["true", "1", "yes", "y"].includes(String(req.query.navigateByClick || "").toLowerCase());
+    if (!sessionId) return res.status(400).json(failure("auto_explore", "Missing required query: sessionId"));
+    const data = await runAgentAction("auto_explore", () =>
+      browserService.autoExplore({ sessionId, maxRoutes, navigateByClick })
+    );
+    return res.json(success("auto_explore", data));
+  } catch (error) {
+    return res.status(500).json(failure("auto_explore", error));
+  }
+});
+
 router.get("/inspect", async (req, res) => {
   try {
     const sessionId = req.query.sessionId;
@@ -119,11 +134,13 @@ router.get("/screenshot", async (req, res) => {
     const fileName = req.query.fileName;
     if (!sessionId) return res.status(400).json(failure("screenshot", "Missing required query: sessionId"));
     const fullPage = String(req.query.fullPage || "").toLowerCase();
+    const embedImage = ["true", "1", "yes", "y"].includes(String(req.query.embedImage || "").toLowerCase());
     const data = await runAgentAction("screenshot", () =>
       browserService.screenshot({
         sessionId,
         fileName,
-        fullPage: ["true", "1", "yes", "y"].includes(fullPage)
+        fullPage: ["true", "1", "yes", "y"].includes(fullPage),
+        embedImage
       })
     );
     return res.json(success("screenshot", data));
@@ -140,6 +157,38 @@ router.get("/analyze", async (req, res) => {
     return res.json(success("analyze", data));
   } catch (error) {
     return res.status(500).json(failure("analyze", error));
+  }
+});
+
+router.get("/element_styles", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    const selector = req.query.selector;
+    const query = req.query.query;
+    const maxOuterHtml = req.query.maxOuterHtml ? Number(req.query.maxOuterHtml) : undefined;
+    const maxTextLength = req.query.maxTextLength ? Number(req.query.maxTextLength) : undefined;
+    if (!sessionId) return res.status(400).json(failure("element_styles", "Missing required query: sessionId"));
+    if (!selector && !query) {
+      return res.status(400).json(failure("element_styles", "Provide selector or query"));
+    }
+    const data = await runAgentAction("element_styles", () =>
+      browserService.extractElementStyles({ sessionId, selector, query, maxOuterHtml, maxTextLength })
+    );
+    return res.json(success("element_styles", data));
+  } catch (error) {
+    return res.status(500).json(failure("element_styles", error));
+  }
+});
+
+router.get("/page_style_map", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    const maxNodes = req.query.maxNodes ? Number(req.query.maxNodes) : undefined;
+    if (!sessionId) return res.status(400).json(failure("page_style_map", "Missing required query: sessionId"));
+    const data = await runAgentAction("page_style_map", () => browserService.pageStyleMap({ sessionId, maxNodes }));
+    return res.json(success("page_style_map", data));
+  } catch (error) {
+    return res.status(500).json(failure("page_style_map", error));
   }
 });
 
@@ -258,7 +307,13 @@ router.get("/sessions", async (_req, res) => {
 
 router.delete("/session/:sessionId", async (req, res) => {
   try {
-    const data = await runAgentAction("close session", () => browserService.closeSession({ sessionId: req.params.sessionId }));
+    let cleanup;
+    if (req.query.cleanup !== undefined) {
+      cleanup = ["true", "1", "yes", "y"].includes(String(req.query.cleanup).toLowerCase());
+    }
+    const data = await runAgentAction("close session", () =>
+      browserService.closeSession({ sessionId: req.params.sessionId, cleanup })
+    );
     return res.json(success("closeSession", data));
   } catch (error) {
     return res.status(500).json(failure("closeSession", error));

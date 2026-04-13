@@ -120,6 +120,31 @@ curl http://localhost:3000/sessions
 curl -X DELETE http://localhost:3000/session/YOUR_SESSION_ID
 ```
 
+## Agent Activity & Manual Interaction Blocking
+
+When the MCP agent is performing browser automation (e.g., clicking, typing, navigating), the system automatically prevents manual user interactions to avoid conflicts. This feature includes:
+
+### Visual Feedback
+- A semi-transparent overlay appears when the agent is active
+- A "Agent is running..." message is displayed in the top-right corner
+- If a user tries to interact while the agent is active, a temporary message appears: "⏳ Agent is currently controlling the browser. Please wait..."
+
+### How It Works
+1. When any agent action starts (via `/click`, `/type`, `/open`, etc.), the browser page sets `window.__mcpAgentActive = true`
+2. Event listeners intercept user interactions (clicks, keystrokes, etc.)
+3. If the agent is active, interactions are blocked and a notification is shown
+4. The agent activity state is tracked per browser session
+
+### Monitoring Agent Activity
+You can monitor agent activity via:
+- `GET /agent/state` - Returns current agent status
+- `GET /agent/events` - Server-Sent Events (SSE) stream for real-time updates
+
+### Manual Interaction Detection
+Even when the agent is not active, manual user interactions are detected and logged via:
+- Server-side notifications sent to connected SSE clients
+- Session scratchpad entries: "⚠ Manual user interaction detected"
+
 ## Endpoints
 
 - `POST /open`

@@ -5,6 +5,22 @@ import { v4 as uuidv4 } from "uuid";
 import { config } from "../config.js";
 import { agentActivityService } from "./agentActivityService.js";
 
+/** Kebab-case names for `getComputedStyle(...).getPropertyValue(...)` (clone / codegen helpers). */
+const COMPUTED_STYLE_PROPERTY_KEYS = [
+  "display", "position", "top", "right", "bottom", "left", "z-index",
+  "width", "height", "min-width", "min-height", "max-width", "max-height",
+  "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+  "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "border", "border-width", "border-style", "border-color", "border-radius", "border-top-width",
+  "box-sizing", "overflow", "overflow-x", "overflow-y",
+  "flex", "flex-direction", "flex-wrap", "justify-content", "align-items", "align-self", "flex-grow", "flex-shrink", "gap",
+  "grid-template-columns", "grid-template-rows", "column-gap", "row-gap",
+  "font-family", "font-size", "font-weight", "font-style", "line-height", "letter-spacing",
+  "text-align", "text-decoration", "text-transform", "white-space", "word-break",
+  "color", "background-color", "background-image", "background-size", "background-position", "background-repeat", "opacity",
+  "box-shadow", "transform", "transition", "visibility", "cursor", "object-fit"
+];
+
 class BrowserService {
   constructor() {
     this.sessions = new Map();
@@ -29,6 +45,83 @@ class BrowserService {
     };
   }
 
+  safeScreenshotSessionSegment(sessionId) {
+    const s = String(sessionId ?? "session")
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .replace(/^\.+/, "")
+      .slice(0, 200);
+    return s || "session";
+  }
+
+  /** Resolved directory for this session's PNGs; falls back to flat `screenshotDir` if subdirs disabled. */
+  sessionScreenshotRoot(sessionId) {
+    if (!config.sessionScreenshotSubdirs) {
+      return path.resolve(config.screenshotDir);
+    }
+    const base = path.resolve(config.screenshotDir);
+    const sub = path.join(base, this.safeScreenshotSessionSegment(sessionId));
+    const resolvedSub = path.resolve(sub);
+    const rel = path.relative(base, resolvedSub);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new Error("Invalid screenshot directory");
+    }
+    return resolvedSub;
+  }
+
+  urlPathKey(href) {
+    try {
+      const u = new URL(href);
+      return `${u.origin}${u.pathname}${u.search}`;
+    } catch {
+      return href;
+    }
+  }
+
+  async navigateInternalByClick(session, targetHref) {
+    const page = session.page;
+    const targetKey = this.urlPathKey(targetHref);
+    if (this.urlPathKey(page.url()) === targetKey) {
+      return { navigatedVia: "already_there" };
+    }
+
+    const clicked = await page.evaluate((want) => {
+      for (const a of document.querySelectorAll("a[href]")) {
+        if (a.href !== want) continue;
+        const r = a.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        a.click();
+        return true;
+      }
+      return false;
+    }, targetHref);
+
+    if (!clicked) {
+      await page.goto(targetHref, { waitUntil: "domcontentloaded", timeout: config.defaultTimeoutMs });
+      await this.waitForSettle(session);
+      return { navigatedVia: "goto_fallback" };
+    }
+
+    try {
+      await page.waitForFunction(
+        (expected) => {
+          try {
+            const u = new URL(window.location.href);
+            const cur = `${u.origin}${u.pathname}${u.search}`;
+            return cur === expected;
+          } catch {
+            return false;
+          }
+        },
+        targetKey,
+        { timeout: config.defaultTimeoutMs }
+      );
+    } catch {
+      await page.waitForTimeout(400);
+    }
+    await this.waitForSettle(session);
+    return { navigatedVia: "click" };
+  }
+
   async getOrCreateSession(sessionId, options = {}) {
     if (sessionId && this.sessions.has(sessionId)) {
       return this.sessions.get(sessionId);
@@ -39,7 +132,7 @@ class BrowserService {
       typeof options.headless === "boolean" ? options.headless : config.defaultHeadless;
     const persist = options.persist ?? false;
     const userDataDir = persist ? path.resolve("user_data", effectiveSessionId) : null;
-    
+
     // Standard resolutions
     const width = config.defaultViewport.width;
     const height = config.defaultViewport.height;
@@ -266,16 +359,127 @@ class BrowserService {
       await session.page.addInitScript(() => {
         window.__mcpAgentActive = false;
         let lastNotify = 0;
-        const notify = () => {
-          if (window.__mcpAgentActive) return;
-          const now = Date.now();
-          if (now - lastNotify > 2000 && window.__mcpManualInteraction) {
-            lastNotify = now;
-            window.__mcpManualInteraction();
+
+        // Create overlay element
+        const overlay = document.createElement('div');
+        overlay.id = '__mcpAgentOverlay';
+        overlay.style.cssText = `
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background: rgba(0, 0, 0, 0.1);
+          backdrop-filter: blur(1px);
+          z-index: 999999;
+          display: none;
+          pointer-events: none;
+        `;
+
+        // Create message box
+        const messageBox = document.createElement('div');
+        messageBox.id = '__mcpAgentMessage';
+        messageBox.style.cssText = `
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          background: white;
+          color: #333;
+          padding: 12px 16px;
+          border-radius: 8px;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          font-size: 14px;
+          z-index: 1000000;
+          display: none;
+          max-width: 300px;
+          border-left: 4px solid #3b82f6;
+        `;
+        messageBox.textContent = 'Agent is running...';
+
+        // Create interaction blocked message
+        const blockedMessage = document.createElement('div');
+        blockedMessage.id = '__mcpBlockedMessage';
+        blockedMessage.style.cssText = `
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          background: rgba(0, 0, 0, 0.8);
+          color: white;
+          padding: 16px 24px;
+          border-radius: 8px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          font-size: 16px;
+          z-index: 1000001;
+          display: none;
+          text-align: center;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        `;
+        blockedMessage.textContent = '⏳ Agent is currently controlling the browser. Please wait...';
+
+        document.body.appendChild(overlay);
+        document.body.appendChild(messageBox);
+        document.body.appendChild(blockedMessage);
+
+        // Function to show/hide agent active state
+        window.__mcpUpdateAgentActive = (active) => {
+          window.__mcpAgentActive = active;
+          if (active) {
+            overlay.style.display = 'block';
+            messageBox.style.display = 'block';
+          } else {
+            overlay.style.display = 'none';
+            messageBox.style.display = 'none';
+            blockedMessage.style.display = 'none';
           }
         };
+
+        // Function to show blocked interaction message
+        window.__mcpShowBlockedMessage = () => {
+          if (!window.__mcpAgentActive) return;
+
+          blockedMessage.style.display = 'block';
+          setTimeout(() => {
+            blockedMessage.style.display = 'none';
+          }, 1500);
+        };
+
+        const notify = (event) => {
+          if (window.__mcpAgentActive) {
+            // Agent is active - block interaction and show message
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+
+            window.__mcpShowBlockedMessage();
+
+            // Still notify about manual interaction attempt
+            const now = Date.now();
+            if (now - lastNotify > 2000 && window.__mcpManualInteraction) {
+              lastNotify = now;
+              window.__mcpManualInteraction();
+            }
+            return false;
+          } else {
+            // Agent is not active - allow interaction and notify
+            const now = Date.now();
+            if (now - lastNotify > 2000 && window.__mcpManualInteraction) {
+              lastNotify = now;
+              window.__mcpManualInteraction();
+            }
+          }
+        };
+
+        // Add event listeners with capture phase to intercept early
         window.addEventListener("mousedown", notify, true);
+        window.addEventListener("click", notify, true);
         window.addEventListener("keydown", notify, true);
+        window.addEventListener("keypress", notify, true);
+        window.addEventListener("input", notify, true);
+        window.addEventListener("change", notify, true);
+        window.addEventListener("focus", notify, true);
+        window.addEventListener("blur", notify, true);
       });
     } catch (error) {
       // Silently ignore if already exposed
@@ -337,11 +541,11 @@ class BrowserService {
   async moveMouseNatural(session, { x, y }) {
     const from = session.lastMousePos || { x: 0, y: 0 };
     const distance = Math.sqrt(Math.pow(x - from.x, 2) + Math.pow(y - from.y, 2));
-    
+
     if (distance < 5) return;
 
     const steps = Math.min(Math.max(Math.floor(distance / 15), 5), 20);
-    
+
     // Simple quadratic Bezier control point for a slight curve
     const control = {
       x: (from.x + x) / 2 + (Math.random() - 0.5) * distance * 0.3,
@@ -351,26 +555,31 @@ class BrowserService {
     const getBezier = (t, p0, p1, p2) => (1 - t) * (1 - t) * p0 + 2 * (1 - t) * t * p1 + t * t * p2;
 
     for (let i = 1; i <= steps; i++) {
-        const t = i / steps;
-        const curX = getBezier(t, from.x, control.x, x);
-        const curY = getBezier(t, from.y, control.y, y);
-        await session.page.mouse.move(curX, curY);
-        if (i % 2 === 0) await new Promise(r => setTimeout(r, 5)); // Micro-jitter
+      const t = i / steps;
+      const curX = getBezier(t, from.x, control.x, x);
+      const curY = getBezier(t, from.y, control.y, y);
+      await session.page.mouse.move(curX, curY);
+      if (i % 2 === 0) await new Promise(r => setTimeout(r, 5)); // Micro-jitter
     }
-    
+
     session.lastMousePos = { x, y };
   }
 
   async waitForSettle(session, timeout = 500) {
     try {
-      await session.page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
+      await session.page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => { });
       await new Promise(r => setTimeout(r, timeout));
     } catch { /* ignore */ }
   }
 
   async setAgentActive(session, active) {
     try {
-      await session.page.evaluate((v) => { window.__mcpAgentActive = v; }, active);
+      await session.page.evaluate((v) => {
+        window.__mcpAgentActive = v;
+        if (window.__mcpUpdateAgentActive) {
+          window.__mcpUpdateAgentActive(v);
+        }
+      }, active);
     } catch { /* ignore */ }
   }
 
@@ -455,12 +664,14 @@ class BrowserService {
   }
 
   async captureScreenshot(session, label) {
-    await fs.mkdir(config.screenshotDir, { recursive: true });
+    const root = this.sessionScreenshotRoot(session.id);
+    await fs.mkdir(root, { recursive: true });
     const safeLabel = (label || "shot").replace(/[^\w-]/g, "_");
     const fileName = `${Date.now()}-${safeLabel}.png`;
-    const absolutePath = path.resolve(config.screenshotDir, fileName);
+    const absolutePath = path.resolve(root, fileName);
     try {
-      await session.page.screenshot({ path: absolutePath, fullPage: false });
+      const buffer = await session.page.screenshot({ fullPage: false });
+      await fs.writeFile(absolutePath, buffer);
       const record = {
         label,
         path: absolutePath,
@@ -537,19 +748,24 @@ class BrowserService {
 
   async openUrl({ sessionId, url, headless, persist }) {
     const session = await this.getOrCreateSession(sessionId, { headless, persist });
-    await session.page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: config.defaultTimeoutMs
-    });
-    const title = await session.page.title();
-    this.appendScratchpad(session, `Opened: ${url} → "${title}"`);
-    this.logAction(session, { action: "open", selector: url, result: "success", metadata: { url } });
-    session.actionHistory.push({ action: "open", target: url, timestamp: new Date().toISOString() });
-    return {
-      sessionId: session.id,
-      url: session.page.url(),
-      title
-    };
+    await this.setAgentActive(session, true);
+    try {
+      await session.page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: config.defaultTimeoutMs
+      });
+      const title = await session.page.title();
+      this.appendScratchpad(session, `Opened: ${url} → "${title}"`);
+      this.logAction(session, { action: "open", selector: url, result: "success", metadata: { url } });
+      session.actionHistory.push({ action: "open", target: url, timestamp: new Date().toISOString() });
+      return {
+        sessionId: session.id,
+        url: session.page.url(),
+        title
+      };
+    } finally {
+      await this.setAgentActive(session, false);
+    }
   }
 
   async click({ sessionId, selector, query }) {
@@ -695,14 +911,19 @@ class BrowserService {
     };
   }
 
-  async screenshot({ sessionId, fileName, fullPage = false }) {
+  async screenshot({ sessionId, fileName, fullPage = false, embedImage = false }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
 
-    await fs.mkdir(config.screenshotDir, { recursive: true });
-    const safeName = fileName || `screenshot-${Date.now()}.png`;
-    const absolutePath = path.resolve(config.screenshotDir, safeName);
-    await session.page.screenshot({ path: absolutePath, fullPage });
+    const root = this.sessionScreenshotRoot(session.id);
+    await fs.mkdir(root, { recursive: true });
+    const rawName = fileName || `screenshot-${Date.now()}.png`;
+    const safeName = rawName.replace(/[^\w.\-() ]/g, "_");
+    const absolutePath = path.resolve(root, safeName);
+
+    const buffer = await session.page.screenshot({ fullPage });
+    await fs.writeFile(absolutePath, buffer);
+
     const metadata = {
       sessionId: session.id,
       path: absolutePath,
@@ -711,7 +932,11 @@ class BrowserService {
     };
     session.screenshotHistory.push(metadata);
     this.logAction(session, { action: "screenshot", result: "success", metadata });
-    return { sessionId: session.id, path: absolutePath, metadata };
+    const result = { sessionId: session.id, path: absolutePath, metadata };
+    if (embedImage) {
+      result.imageBase64 = buffer.toString("base64");
+    }
+    return result;
   }
 
   async analyze({ sessionId }) {
@@ -719,6 +944,95 @@ class BrowserService {
     if (!session) throw new Error("Session not found");
     const summary = await this.analyzePageState(session);
     this.logAction(session, { action: "analyze", result: "success", metadata: { url: summary.url } });
+    return { sessionId: session.id, ...summary };
+  }
+
+  async extractElementStyles({ sessionId, selector, query, maxOuterHtml = 2000, maxTextLength = 200 }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    if (!selector && !query) throw new Error("Provide selector or query");
+    const resolved = await this.resolveSelector(session, { selector, query, action: "click" });
+    const keys = COMPUTED_STYLE_PROPERTY_KEYS;
+
+    const detail = await session.page.locator(resolved.selector).first().evaluate(
+      (el, { keys, maxOuterHtml, maxTextLength }) => {
+        const cs = getComputedStyle(el);
+        const computed = {};
+        for (const k of keys) computed[k] = cs.getPropertyValue(k);
+        const r = el.getBoundingClientRect();
+        const attrs = {};
+        for (const a of [...el.attributes].slice(0, 40)) {
+          attrs[a.name] = String(a.value).slice(0, 500);
+        }
+        return {
+          tag: el.tagName.toLowerCase(),
+          outerHTML: (el.outerHTML || "").slice(0, maxOuterHtml),
+          textPreview: (el.innerText || el.textContent || "").trim().slice(0, maxTextLength),
+          box: { x: r.x, y: r.y, width: r.width, height: r.height, top: r.top, left: r.left },
+          attributes: attrs,
+          computed
+        };
+      },
+      { keys, maxOuterHtml, maxTextLength }
+    );
+
+    this.logAction(session, {
+      action: "extractElementStyles",
+      result: "success",
+      metadata: { selector: resolved.selector, tag: detail.tag }
+    });
+    return {
+      sessionId: session.id,
+      url: session.page.url(),
+      selector: resolved.selector,
+      strategy: resolved.strategy,
+      ...detail
+    };
+  }
+
+  async pageStyleMap({ sessionId, maxNodes = 80 }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    const keys = COMPUTED_STYLE_PROPERTY_KEYS;
+    const cap = Math.min(500, Math.max(5, Number(maxNodes) || 80));
+
+    const summary = await session.page.evaluate(({ maxNodes, keys }) => {
+      const nodes = [];
+      const root = document.body;
+      if (!root) {
+        return { url: window.location.href, title: document.title, returned: 0, nodes: [] };
+      }
+      const all = root.querySelectorAll("*");
+      for (const el of all) {
+        if (nodes.length >= maxNodes) break;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 && r.height < 1) continue;
+        const cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden") continue;
+        const computed = {};
+        for (const k of keys) computed[k] = cs.getPropertyValue(k);
+        nodes.push({
+          tag: el.tagName.toLowerCase(),
+          id: el.id || undefined,
+          className: typeof el.className === "string" ? el.className.slice(0, 160) : undefined,
+          textPreview: (el.innerText || "").trim().replace(/\s+/g, " ").slice(0, 80),
+          box: { x: r.x, y: r.y, w: r.width, h: r.height },
+          computed
+        });
+      }
+      return {
+        url: window.location.href,
+        title: document.title,
+        returned: nodes.length,
+        nodes
+      };
+    }, { maxNodes: cap, keys });
+
+    this.logAction(session, {
+      action: "pageStyleMap",
+      result: "success",
+      metadata: { count: summary.returned }
+    });
     return { sessionId: session.id, ...summary };
   }
 
@@ -1059,7 +1373,7 @@ class BrowserService {
 
     for (const link of routesToCapture) {
       try {
-        await session.page.goto(link, { waitUntil: "domcontentloaded", timeout: 8000 });
+        await session.page.goto(link, { waitUntil: "domcontentloaded", timeout: config.defaultTimeoutMs });
         const shot = await this.captureScreenshot(session, `route`);
         const errors = session.consoleErrors.length;
         captures.push({ url: link, screenshot: shot.path, consoleErrors: errors });
@@ -1077,52 +1391,103 @@ class BrowserService {
 
   async discoverUIRoutes(session) {
     this.appendScratchpad(session, "Discovering routes via UI interaction...");
-    
-    const results = await session.page.evaluate(async () => {
-      const discovered = new Set();
-      const hubs = [];
+    const page = session.page;
+    const discovered = new Set();
 
-      // 1. Identify navigation containers
-      const navContainers = Array.from(document.querySelectorAll('nav, header, aside, [role="navigation"], .navbar, .sidebar, .menu'));
-      
-      // 2. Find "Interactive Hubs" (menus, dropdowns)
-      const interactives = Array.from(document.querySelectorAll('button, [role="button"], a')).filter(el => {
-        const text = (el.innerText || "").toLowerCase();
-        const hasCaret = text.includes('⌄') || text.includes('v') || text.includes('arrow') || text.includes('menu');
-        const isNav = navContainers.some(nav => nav.contains(el));
-        return isNav && (hasCaret || el.querySelector('svg') || el.className.toLowerCase().includes('dropdown'));
-      });
+    // 1. Identify navigation containers with expanded selectors
+    const navSelectors = [
+      'nav',
+      'header',
+      'aside',
+      '[role="navigation"]',
+      '.navbar',
+      '.sidebar',
+      '.menu',
+      '.nav',
+      '.navigation',
+      '.main-menu',
+      '.top-nav',
+      '.header-nav',
+      '.site-nav',
+      '.primary-nav',
+      'ul.nav',
+      'ul.menu'
+    ];
+    const navContainerHandles = await page.$$(navSelectors.join(','));
 
-      const wait = (ms) => new Promise(res => setTimeout(res, ms));
+    // 2. Collect all visible links from nav containers
+    for (const container of navContainerHandles) {
+      const links = await container.$$eval('a[href]', (anchors) =>
+        anchors.map(a => ({
+          title: a.innerText.trim(),
+          href: a.href
+        }))
+      );
+      links.forEach(link => discovered.add(link));
+      await container.dispose();
+    }
 
-      // 3. For each hub, click/hover and see what appears
-      for (const el of interactives.slice(0, 10)) {
-        try {
-          el.scrollIntoView();
-          el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-          el.click();
-          await wait(500);
-          
-          // Scrape newly visible links
-          Array.from(document.querySelectorAll('a[href]')).forEach(a => {
-            if (a.offsetParent !== null) { // effectively visible
-               discovered.add({ title: a.innerText.trim(), href: a.href });
-            }
-          });
-        } catch (e) { /* ignore */ }
+    // 3. Find interactive hubs (dropdowns, menus)
+    const interactiveSelectors = [
+      'button',
+      '[role="button"]',
+      'a'
+    ];
+    const interactiveHandles = await page.$$(interactiveSelectors.join(','));
+    const hubs = [];
+    for (const handle of interactiveHandles) {
+      const isNav = await handle.evaluate((el, navSelectors) => {
+        const navContainers = document.querySelectorAll(navSelectors.join(','));
+        return Array.from(navContainers).some(nav => nav.contains(el));
+      }, navSelectors);
+      if (!isNav) {
+        await handle.dispose();
+        continue;
       }
-
-      // 4. Also get all currently visible links in nav containers
-      navContainers.forEach(nav => {
-        Array.from(nav.querySelectorAll('a[href]')).forEach(a => {
-          discovered.add({ title: a.innerText.trim(), href: a.href });
-        });
+      const hasCaret = await handle.evaluate(el => {
+        const text = (el.innerText || "").toLowerCase();
+        return text.includes('⌄') || text.includes('v') || text.includes('arrow') || text.includes('menu');
       });
+      const hasSvg = await handle.evaluate(el => !!el.querySelector('svg'));
+      const hasDropdownClass = await handle.evaluate(el =>
+        el.className.toLowerCase().includes('dropdown')
+      );
+      if (hasCaret || hasSvg || hasDropdownClass) {
+        hubs.push(handle);
+      } else {
+        await handle.dispose();
+      }
+    }
 
-      return Array.from(discovered);
-    });
+    // 4. Interact with each hub (hover/click) to reveal submenus
+    for (const hub of hubs.slice(0, 10)) {
+      try {
+        await hub.scrollIntoViewIfNeeded();
+        await hub.hover();
+        await page.waitForTimeout(300); // allow animation
+        await hub.click();
+        await page.waitForTimeout(500);
 
-    const currentOrigin = await session.page.evaluate(() => window.location.origin);
+        // Collect newly visible links
+        const newLinks = await page.$$eval('a[href]', (anchors) =>
+          anchors
+            .filter(a => a.offsetParent !== null)
+            .map(a => ({
+              title: a.innerText.trim(),
+              href: a.href
+            }))
+        );
+        newLinks.forEach(link => discovered.add(link));
+      } catch (e) {
+        // ignore interaction errors
+      } finally {
+        await hub.dispose();
+      }
+    }
+
+    // 5. Convert Set to array and filter internal routes
+    const results = Array.from(discovered);
+    const currentOrigin = await page.evaluate(() => window.location.origin);
     const internalRoutes = results
       .filter(r => r.href.startsWith(currentOrigin) && !r.href.includes('#'))
       .map(r => ({ ...r, path: r.href.replace(currentOrigin, '') }));
@@ -1130,7 +1495,7 @@ class BrowserService {
     return internalRoutes;
   }
 
-  async autoExplore({ sessionId, maxRoutes = 10 }) {
+  async autoExplore({ sessionId, maxRoutes = 10, navigateByClick = false }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
 
@@ -1139,7 +1504,7 @@ class BrowserService {
 
     const captures = [];
     const originalUrl = session.page.url();
-    
+
     // De-duplicate by path
     const uniqueRoutes = [];
     const seenPaths = new Set();
@@ -1151,19 +1516,31 @@ class BrowserService {
     }
 
     const routesToVisit = uniqueRoutes.slice(0, maxRoutes);
-    this.appendScratchpad(session, `Visiting ${routesToVisit.length} unique routes...`);
+    this.appendScratchpad(
+      session,
+      `Visiting ${routesToVisit.length} unique routes (${navigateByClick ? "click nav" : "direct goto"})...`
+    );
 
     for (const route of routesToVisit) {
       try {
-        await session.page.goto(route.href, { waitUntil: "domcontentloaded", timeout: 8000 });
-        const shot = await this.captureScreenshot(session, `explore_${route.title || 'page'}`);
-        captures.push({ 
-          title: route.title, 
-          url: route.href, 
+        let navigatedVia = "goto";
+        if (navigateByClick) {
+          await session.page.goto(originalUrl, { waitUntil: "domcontentloaded", timeout: config.defaultTimeoutMs });
+          await this.waitForSettle(session);
+          const nav = await this.navigateInternalByClick(session, route.href);
+          navigatedVia = nav.navigatedVia;
+        } else {
+          await session.page.goto(route.href, { waitUntil: "domcontentloaded", timeout: config.defaultTimeoutMs });
+        }
+        const shot = await this.captureScreenshot(session, `explore_${route.title || "page"}`);
+        captures.push({
+          title: route.title,
+          url: route.href,
           path: route.path,
-          screenshot: shot.path 
+          screenshot: shot.path,
+          navigatedVia
         });
-        this.appendScratchpad(session, `  ✓ Visited: ${route.title || route.path}`);
+        this.appendScratchpad(session, `  ✓ Visited: ${route.title || route.path} (${navigatedVia})`);
       } catch (err) {
         captures.push({ title: route.title, url: route.href, error: err.message });
         this.appendScratchpad(session, `  ✗ Failed: ${route.title || route.path} → ${err.message}`);
@@ -1175,21 +1552,28 @@ class BrowserService {
       await session.page.goto(originalUrl, { waitUntil: "domcontentloaded" });
     } catch { /* ignore */ }
 
-    return { 
-      sessionId: session.id, 
-      totalDiscovered: routes.length, 
+    return {
+      sessionId: session.id,
+      totalDiscovered: routes.length,
       visitedCount: captures.length,
-      captures 
+      captures
     };
   }
 
   async cleanupSession(session) {
     this.appendScratchpad(session, "Cleaning up session artifacts...");
-    
-    // 1. Screenshots
+
+    // 1. Screenshots — remove whole session subfolder when enabled, plus any legacy loose files
+    if (config.sessionScreenshotSubdirs) {
+      try {
+        await fs.rm(this.sessionScreenshotRoot(session.id), { recursive: true, force: true });
+      } catch { /* ignore */ }
+    }
     for (const record of session.screenshotHistory) {
       if (record.path) {
-        try { await fs.unlink(record.path); } catch { /* ignore */ }
+        try {
+          await fs.unlink(record.path);
+        } catch { /* ignore */ }
       }
     }
 

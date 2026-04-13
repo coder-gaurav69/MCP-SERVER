@@ -1,11 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import { z } from "zod/v3";
+import { z } from "zod";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { browserService } from "./services/browserService.js";
 
-const server = new McpServer(
+export const server = new McpServer(
   {
     name: "user-browser-automation-mcp-server",
     version: "2.0.0"
@@ -69,7 +71,7 @@ tool(
 
 tool(
   "browser_close_session",
-  "Close a session and its browser. Set cleanup=true to delete all screenshots, downloads, and user data for this session.",
+  "Close a session and its browser. Set cleanup=true to delete this session's screenshot folder (and files), downloads for the session, and persist user_data for that session.",
   { 
     sessionId: z.string(),
     cleanup: z.boolean().optional()
@@ -218,6 +220,30 @@ tool(
 );
 
 tool(
+  "browser_element_styles",
+  "Computed CSS + layout for one element (selector or natural-language query). Use to recreate styling / pixel-close clones.",
+  {
+    sessionId: z.string(),
+    selector: z.string().optional(),
+    query: z.string().optional(),
+    maxOuterHtml: z.number().optional(),
+    maxTextLength: z.number().optional()
+  },
+  ({ sessionId, selector, query, maxOuterHtml, maxTextLength }) =>
+    browserService.extractElementStyles({ sessionId, selector, query, maxOuterHtml, maxTextLength })
+);
+
+tool(
+  "browser_page_style_map",
+  "Sample visible DOM nodes with computed styles (capped). Lighter than inspecting every element manually.",
+  {
+    sessionId: z.string(),
+    maxNodes: z.number().optional()
+  },
+  ({ sessionId, maxNodes }) => browserService.pageStyleMap({ sessionId, maxNodes })
+);
+
+tool(
   "browser_test_page",
   "Run a quality/health check: broken images, missing alt tags, console errors, network errors, SEO meta.",
   { sessionId: z.string() },
@@ -231,25 +257,60 @@ tool(
   ({ sessionId }) => browserService.getErrors({ sessionId })
 );
 
-tool(
-  "browser_screenshot",
-  "Take a screenshot. Viewport only by default (fast). Set fullPage=true for full page.",
-  {
+{
+  const screenshotSchema = {
     sessionId: z.string(),
     fileName: z.string().optional(),
-    fullPage: z.boolean().optional()
-  },
-  ({ sessionId, fileName, fullPage }) => browserService.screenshot({ sessionId, fileName, fullPage })
-);
+    fullPage: z.boolean().optional(),
+    embedImage: z
+      .boolean()
+      .optional()
+      .describe("When true, also returns an MCP image content block (PNG) so the client can show it inline.")
+  };
+  normalizeObjectSchema(screenshotSchema);
+  server.tool(
+    "browser_screenshot",
+    "Take a screenshot saved under screenshots/<sessionId>/ (when SESSION_SCREENSHOT_SUBDIRS is on). Viewport by default; fullPage=true for full scroll. embedImage=true adds inline PNG for the MCP client.",
+    screenshotSchema,
+    async (args) => {
+      const { sessionId, fileName, fullPage, embedImage } = args ?? {};
+      try {
+        const data = await browserService.screenshot({
+          sessionId,
+          fileName,
+          fullPage,
+          embedImage: !!embedImage
+        });
+        const { imageBase64, ...rest } = data;
+        const textPayload = { ok: true, data: { ...rest, imageAttached: !!imageBase64 } };
+        const content = [jsonText(textPayload)];
+        if (imageBase64) {
+          content.push({ type: "image", data: imageBase64, mimeType: "image/png" });
+        }
+        return { content };
+      } catch (error) {
+        return {
+          isError: true,
+          content: jsonText({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error || "Unknown error")
+          })
+        };
+      }
+    }
+  );
+}
 
 tool(
   "browser_auto_explore",
-  "Intelligently explore the site by interacting with navigation menus/dropdowns to discover 'Real' routes. Captures screenshots of each discovered page.",
+  "Explore via nav discovery, then visit each route. Set navigateByClick=true to open links by clicking from the start URL (better for SPAs) instead of only using goto.",
   {
     sessionId: z.string(),
-    maxRoutes: z.number().optional()
+    maxRoutes: z.number().optional(),
+    navigateByClick: z.boolean().optional()
   },
-  ({ sessionId, maxRoutes }) => browserService.autoExplore({ sessionId, maxRoutes })
+  ({ sessionId, maxRoutes, navigateByClick }) =>
+    browserService.autoExplore({ sessionId, maxRoutes, navigateByClick: !!navigateByClick })
 );
 
 tool(
@@ -281,5 +342,20 @@ tool(
   ({ sessionId }) => browserService.getSessionState({ sessionId })
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+
+// Only connect to Stdio if this file is run directly
+const isMainModule = () => {
+  if (!process.argv[1]) return false;
+  try {
+    const scriptPath = path.resolve(process.argv[1]).toLowerCase();
+    const modulePath = path.resolve(fileURLToPath(import.meta.url)).toLowerCase();
+    return scriptPath === modulePath;
+  } catch (e) {
+    return false;
+  }
+};
+
+if (isMainModule()) {
+  const transport = new StdioServerTransport();
+  server.connect(transport).catch(console.error);
+}

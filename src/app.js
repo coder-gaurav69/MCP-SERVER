@@ -2,6 +2,8 @@ import express from "express";
 import morgan from "morgan";
 import browserRoutes from "./routes/browserRoutes.js";
 import { failure } from "./utils/response.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { server as mcpServer } from "./mcpServer.js";
 
 
 
@@ -121,6 +123,9 @@ export function createApp() {
           "GET /agent/state",
           "GET /screenshot",
           "GET /analyze",
+          "GET /element_styles",
+          "GET /page_style_map",
+          "GET /auto_explore",
           "GET /errors",
           "GET /state",
           "GET /sessions",
@@ -139,6 +144,44 @@ export function createApp() {
       data: { ok: true },
       error: ""
     });
+  });
+
+  // --- MCP SSE Integration ---
+  let mcpTransports = [];
+
+  app.get("/mcp/sse", async (req, res) => {
+    try {
+      console.log("[MCP] New SSE connection request");
+      const transport = new SSEServerTransport("/mcp/messages", res);
+      mcpTransports.push(transport);
+      await mcpServer.connect(transport);
+      
+      // Cleanup when connection closes
+      req.on("close", () => {
+        console.log("[MCP] SSE connection closed");
+        mcpTransports = mcpTransports.filter(t => t !== transport);
+      });
+    } catch (error) {
+      console.error("[MCP SSE ERROR]", error);
+      if (!res.headersSent) {
+        res.status(500).json(failure("mcp", "Failed to connect MCP transport"));
+      }
+    }
+  });
+
+  app.post("/mcp/messages", async (req, res) => {
+    try {
+      console.log("[MCP] Incoming message for session:", req.query.sessionId);
+      const transport = mcpTransports.find(t => t.sessionId === req.query.sessionId);
+      if (transport) {
+        await transport.handlePostMessage(req, res);
+      } else {
+        res.status(404).json(failure("mcp", "Session not found or expired"));
+      }
+    } catch (error) {
+      console.error("[MCP Message ERROR]", error);
+      res.status(500).json(failure("mcp", error));
+    }
   });
 
   app.use("/", browserRoutes);

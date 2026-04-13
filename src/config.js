@@ -27,6 +27,8 @@ export const config = {
   // NOTE: keep empty by default; only use if explicitly set (mostly useful for headless consistency).
   browserScaleFactor: process.env.BROWSER_SCALE_FACTOR ? Number(process.env.BROWSER_SCALE_FACTOR) : null,
   screenshotDir: process.env.SCREENSHOT_DIR || "screenshots",
+  /** When true, screenshots are stored under screenshots/<sessionId>/ and removed entirely on cleanup. */
+  sessionScreenshotSubdirs: toBoolean(process.env.SESSION_SCREENSHOT_SUBDIRS, true),
   downloadsDir: process.env.DOWNLOADS_DIR || "downloads",
   autoCleanup: toBoolean(process.env.AUTO_CLEANUP, false),
   defaultViewport: {
