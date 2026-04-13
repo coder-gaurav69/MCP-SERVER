@@ -1,3 +1,46 @@
 {
-	"mcpServers": {}
+  "mcpServers": {
+    "browser-automation": {
+      "command": "node",
+      "args": [
+        "c:/Users/Gaurav/Desktop/MCP SERVER/MCP-SERVER/src/mcpServer.js"
+      ],
+      "env": {
+        "PORT": "1001",
+        "HEADLESS": "false",
+        "TURBO_MODE": "true",
+        "AUTO_CLEANUP": "true",
+        "INTERACTION_LOCK": "true",
+        "BROWSER_CHANNEL": "chrome"
+      },
+      "alwaysAllow": [
+        "browser_analyze",
+        "browser_auto_explore",
+        "browser_capture_links",
+        "browser_click",
+        "browser_close_session",
+        "browser_element_styles",
+        "browser_errors",
+        "browser_fill_form",
+        "browser_flow",
+        "browser_hover",
+        "browser_inspect",
+        "browser_open",
+        "browser_page_style_map",
+        "browser_plan",
+        "browser_screenshot",
+        "browser_scroll",
+        "browser_select",
+        "browser_sessions",
+        "browser_state",
+        "browser_test_page",
+        "browser_type",
+        "browser_update_scratchpad",
+        "browser_upload",
+        "browser_wait",
+        "browser_tool_guide",
+        "browser_configure"
+      ]
+    }
+  }
 }

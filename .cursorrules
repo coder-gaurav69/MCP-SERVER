@@ -1,0 +1,24 @@
+# Browser Automation MCP Rules
+
+Read `ARCHITECTURE.md` and `MCP_TOOL_GUIDE.md` first. These are the canonical references for this project.
+
+- ---
+
+> [!WARNING]
+> **IMPORTANT FOR AI AGENTS**: 
+> - **DO NOT USE CURL** to interact with this server. 
+> - This is an **MCP STDIO** server. Use native tool calls only.
+> - The port **1000** is ONLY for the optional management dashboard, NOT for tool execution.
+
+---
+- **Project Core**: This is a Node.js MCP server using Playwright. It is optimized for AI agents to perform stealthy browser actions.
+- **Immediate Feedback**: ALWAYS use `embedImage: true` and `saveLocal: false` when taking screenshots; this ensures the image appears in the Cursor chat without creating junk files on the user's disk.
+- **Selector Strategy**: Do not guess selectors. Use `browser_analyze` first to see interactive elements and their optimized selectors.
+- **Performance**: Use `browser_fill_form` for forms instead of multiple `browser_type` calls.
+- **Navigation**: Use `browser_open` for first-time visits and `browser_auto_explore` for discovering routes.
+- **Stealth**: Do not simulate opening or clicking in text; use the real MCP tools.
+
+Read implementation files only when editing or debugging the server itself.
+
+- **CRITICAL CALLING RULE**: If you are calling tools via a wrapper like `use_mcp_tool`, you MUST pass the tool arguments inside a `nativeArgs` object (e.g., `nativeArgs: { "url": "..." }`). Failing to do this will cause execution errors.
+

@@ -184,6 +184,7 @@ export function createApp() {
     }
   });
 
+  app.use("/api/browser", browserRoutes);
   app.use("/", browserRoutes);
 
   app.use((req, res) => {

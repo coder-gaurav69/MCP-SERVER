@@ -104,11 +104,11 @@ router.get("/inspect", async (req, res) => {
 
 router.post("/click", async (req, res) => {
   try {
-    const { sessionId, selector, query } = req.body || {};
+    const { sessionId, selector, query, settlePolicy } = req.body || {};
     if (!sessionId || (!selector && !query)) {
       return res.status(400).json(failure("click", "Missing required fields: sessionId and selector/query"));
     }
-    const data = await runAgentAction("click", () => browserService.click({ sessionId, selector, query }));
+    const data = await runAgentAction("click", () => browserService.click({ sessionId, selector, query, settlePolicy }));
     return res.json(success("click", data));
   } catch (error) {
     return res.status(500).json(failure("click", error));
@@ -192,6 +192,28 @@ router.get("/page_style_map", async (req, res) => {
   }
 });
 
+router.post("/extract_blueprint", async (req, res) => {
+  try {
+    const { sessionId, selector, maxDepth } = req.body || {};
+    if (!sessionId) return res.status(400).json(failure("extract_blueprint", "Missing required field: sessionId"));
+    const data = await runAgentAction("extract_blueprint", () => browserService.extractBlueprint({ sessionId, selector, maxDepth }));
+    return res.json(success("extract_blueprint", data));
+  } catch (error) {
+    return res.status(500).json(failure("extract_blueprint", error));
+  }
+});
+
+router.get("/palette", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    if (!sessionId) return res.status(400).json(failure("palette", "Missing required query: sessionId"));
+    const data = await runAgentAction("palette", () => browserService.getGlobalPalette({ sessionId }));
+    return res.json(success("palette", data));
+  } catch (error) {
+    return res.status(500).json(failure("palette", error));
+  }
+});
+
 router.get("/errors", async (req, res) => {
   try {
     const sessionId = req.query.sessionId;
@@ -261,6 +283,45 @@ router.post("/upload", async (req, res) => {
     return res.json(success("upload", data));
   } catch (error) {
     return res.status(500).json(failure("upload", error));
+  }
+});
+
+router.post("/press_key", async (req, res) => {
+  try {
+    const { sessionId, key, count, delay } = req.body || {};
+    if (!sessionId || !key) {
+      return res.status(400).json(failure("press_key", "Missing required fields: sessionId, key"));
+    }
+    const data = await runAgentAction("press_key", () => browserService.pressKey({ sessionId, key, count, delay }));
+    return res.json(success("press_key", data));
+  } catch (error) {
+    return res.status(500).json(failure("press_key", error));
+  }
+});
+
+router.post("/generate_pdf", async (req, res) => {
+  try {
+    const { sessionId, fileName, format, landscape, printBackground } = req.body || {};
+    if (!sessionId) {
+      return res.status(400).json(failure("generate_pdf", "Missing required field: sessionId"));
+    }
+    const data = await runAgentAction("generate_pdf", () => browserService.generatePdf({ sessionId, fileName, format, landscape, printBackground }));
+    return res.json(success("generate_pdf", data));
+  } catch (error) {
+    return res.status(500).json(failure("generate_pdf", error));
+  }
+});
+
+router.post("/fill_form", async (req, res) => {
+  try {
+    const { sessionId, fields } = req.body || {};
+    if (!sessionId || !fields) {
+      return res.status(400).json(failure("fill_form", "Missing required fields: sessionId, fields"));
+    }
+    const data = await runAgentAction("fill_form", () => browserService.fillForm({ sessionId, fields }));
+    return res.json(success("fill_form", data));
+  } catch (error) {
+    return res.status(500).json(failure("fill_form", error));
   }
 });
 

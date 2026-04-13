@@ -2,6 +2,9 @@
 
 Production-ready Node.js + Express + Playwright server for browser automation.
 
+> [!TIP]
+> **AI AGENTS (Cursor, Copilot, Roo Code, Antigravity, etc.)**: Read [MCP_TOOL_GUIDE.md](./MCP_TOOL_GUIDE.md) first. It is the canonical one-file tool index and usage policy, also exposed at `mcp://browser-automation/tool-guide` and through `browser_tool_guide`. Do not scan the whole repo just to discover tools; use the provided MCP tools directly.
+
 ## Requirements
 
 - Node.js 18.18+ (or newer)
@@ -166,3 +169,13 @@ Even when the agent is not active, manual user interactions are detected and log
 - `DELETE /session/:sessionId`
 - `GET /health`
 
+
+---
+
+## Agent Instructions (For Cursor, Roo Code, etc.)
+
+If you are an AI model using this server:
+1.  **See the Page**: When taking screenshots, use embedImage: true and saveLocal: false to show the image directly to the user in the chat without clogging their drive.
+2.  **Understand State**: Use rowser_analyze before any interaction to get valid selectors and page structure.
+3.  **Efficiency**: Batch your inputs using rowser_fill_form.
+4.  **Stealth**: Never simulate typing or clicking with text symbols; use the dedicated tools to ensure human-like behavior.

@@ -11,7 +11,7 @@ const toBoolean = (value, fallback = true) => {
 
 export const config = {
   host: process.env.HOST || "127.0.0.1",
-  port: Number(process.env.PORT || 3000),
+  port: Number(process.env.PORT || 1000),
   defaultHeadless: toBoolean(process.env.HEADLESS, false),
   defaultTimeoutMs: Number(process.env.DEFAULT_TIMEOUT_MS || 10000),
   maxRetries: Number(process.env.MAX_RETRIES || 3),
@@ -30,10 +30,12 @@ export const config = {
   /** When true, screenshots are stored under screenshots/<sessionId>/ and removed entirely on cleanup. */
   sessionScreenshotSubdirs: toBoolean(process.env.SESSION_SCREENSHOT_SUBDIRS, true),
   downloadsDir: process.env.DOWNLOADS_DIR || "downloads",
-  autoCleanup: toBoolean(process.env.AUTO_CLEANUP, false),
+  autoCleanup: toBoolean(process.env.AUTO_CLEANUP, true),
   defaultViewport: {
     width: Number(process.env.VIEWPORT_WIDTH || 1920),
     height: Number(process.env.VIEWPORT_HEIGHT || 1080)
   },
-  stealthMode: toBoolean(process.env.STEALTH_MODE, true)
+  stealthMode: toBoolean(process.env.STEALTH_MODE, true),
+  turboMode: toBoolean(process.env.TURBO_MODE, true),
+  interactionLock: toBoolean(process.env.INTERACTION_LOCK, true)
 };

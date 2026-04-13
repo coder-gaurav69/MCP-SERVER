@@ -1,15 +1,17 @@
 {
   "mcpServers": {
-    "user-browser-automation-mcp-server": {
+    "browser-automation": {
       "command": "node",
-      "args": ["./src/mcpServer.js"],
-      "cwd": "C:/Users/Gaurav/Desktop/MCP SERVER/MCP-SERVER",
+      "args": [
+        "c:/Users/Gaurav/Desktop/MCP SERVER/MCP-SERVER/src/mcpServer.js"
+      ],
       "env": {
-        "HEADLESS": "true",
-        "DEFAULT_TIMEOUT_MS": "10000",
-        "MAX_RETRIES": "3",
-        "SCREENSHOT_DIR": "screenshots",
-        "SESSION_SCREENSHOT_SUBDIRS": "true"
+        "PORT": "1000",
+        "HEADLESS": "false",
+        "TURBO_MODE": "true",
+        "AUTO_CLEANUP": "true",
+        "INTERACTION_LOCK": "true",
+        "BROWSER_CHANNEL": "chrome"
       },
       "alwaysAllow": [
         "browser_analyze",
@@ -35,7 +37,9 @@
         "browser_type",
         "browser_update_scratchpad",
         "browser_upload",
-        "browser_wait"
+        "browser_wait",
+        "browser_tool_guide",
+        "browser_configure"
       ]
     }
   }

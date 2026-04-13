@@ -350,140 +350,163 @@ class BrowserService {
   }
 
   async injectInteractionMonitor(session) {
+    if (!config.interactionLock) return;
     try {
       await session.page.exposeFunction("__mcpManualInteraction", () => {
         agentActivityService.notifyManualInteraction(session.id);
         this.appendScratchpad(session, "⚠ Manual user interaction detected");
       });
 
+      // Inject into ALL frames
       await session.page.addInitScript(() => {
-        window.__mcpAgentActive = false;
-        let lastNotify = 0;
+        const isStickyActive = () => {
+          try { return sessionStorage.getItem('__mcpAgentActive') === 'true'; } catch { return false; }
+        };
 
-        // Create overlay element
-        const overlay = document.createElement('div');
-        overlay.id = '__mcpAgentOverlay';
-        overlay.style.cssText = `
-          position: fixed;
-          top: 0;
-          left: 0;
-          width: 100%;
-          height: 100%;
-          background: rgba(0, 0, 0, 0.1);
-          backdrop-filter: blur(1px);
-          z-index: 999999;
-          display: none;
-          pointer-events: none;
-        `;
+        window.__mcpAgentActive = isStickyActive();
 
-        // Create message box
-        const messageBox = document.createElement('div');
-        messageBox.id = '__mcpAgentMessage';
-        messageBox.style.cssText = `
-          position: fixed;
-          top: 20px;
-          right: 20px;
-          background: white;
-          color: #333;
-          padding: 12px 16px;
-          border-radius: 8px;
-          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          font-size: 14px;
-          z-index: 1000000;
-          display: none;
-          max-width: 300px;
-          border-left: 4px solid #3b82f6;
-        `;
-        messageBox.textContent = 'Agent is running...';
+        const setupUI = () => {
+          // Only create overlay in the main frame, but block events in all frames
+          const isMainFrame = window.self === window.top;
+          if (!isMainFrame) return;
 
-        // Create interaction blocked message
-        const blockedMessage = document.createElement('div');
-        blockedMessage.id = '__mcpBlockedMessage';
-        blockedMessage.style.cssText = `
-          position: fixed;
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -50%);
-          background: rgba(0, 0, 0, 0.8);
-          color: white;
-          padding: 16px 24px;
-          border-radius: 8px;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          font-size: 16px;
-          z-index: 1000001;
-          display: none;
-          text-align: center;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
-        `;
-        blockedMessage.textContent = '⏳ Agent is currently controlling the browser. Please wait...';
+          if (document.getElementById('__mcpAgentOverlay')) return;
 
-        document.body.appendChild(overlay);
-        document.body.appendChild(messageBox);
-        document.body.appendChild(blockedMessage);
+          const overlay = document.createElement('div');
+          overlay.id = '__mcpAgentOverlay';
+          overlay.style.cssText = `
+            position: fixed;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0, 0, 0, 0.05);
+            z-index: 2147483645;
+            display: ${window.__mcpAgentActive ? 'block' : 'none'};
+            pointer-events: all;
+            cursor: wait;
+            transition: opacity 0.3s ease;
+            opacity: ${window.__mcpAgentActive ? '1' : '0'};
+            user-select: none;
+          `;
 
-        // Function to show/hide agent active state
+          const pulseBorder = document.createElement('div');
+          pulseBorder.id = '__mcpAgentPulseBorder';
+          pulseBorder.style.cssText = `
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            border: 0px solid rgba(239, 68, 68, 0);
+            pointer-events: none;
+            z-index: 2147483646;
+            transition: all 0.2s ease;
+          `;
+
+          const controlCenter = document.createElement('div');
+          controlCenter.style.cssText = `
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 9999px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: transform 0.1s ease;
+          `;
+
+          const style = document.createElement('style');
+          style.textContent = `
+            @keyframes mcp-blink { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+            @keyframes mcp-shake-small { 0%, 100% { transform: translateX(-50%); } 25% { transform: translateX(-52%); } 75% { transform: translateX(-48%); } }
+            .mcp-shake-small { animation: mcp-shake-small 0.3s ease-in-out; }
+            .mcp-pulse-active { border: 4px solid rgba(239, 68, 68, 0.5) !important; box-shadow: inset 0 0 50px rgba(239, 68, 68, 0.2); }
+          `;
+          document.head.appendChild(style);
+
+          const pulse = document.createElement('div');
+          pulse.style.cssText = `width: 12px; height: 12px; background: #3b82f6; border-radius: 50%; animation: mcp-blink 1.5s infinite ease-in-out;`;
+
+          const textWrapper = document.createElement('div');
+          textWrapper.style.cssText = `display: flex; flex-direction: column;`;
+          const title = document.createElement('span');
+          title.style.cssText = `font-size: 14px; font-weight: 600;`;
+          title.textContent = 'Agent is working...';
+          const subtitle = document.createElement('span');
+          subtitle.style.cssText = `font-size: 11px; color: #94a3b8;`;
+          subtitle.textContent = 'Interaction locked for stability';
+
+          textWrapper.appendChild(title);
+          textWrapper.appendChild(subtitle);
+          controlCenter.appendChild(pulse);
+          controlCenter.appendChild(textWrapper);
+          overlay.appendChild(controlCenter);
+          document.documentElement.appendChild(overlay);
+          document.documentElement.appendChild(pulseBorder);
+        };
+
         window.__mcpUpdateAgentActive = (active) => {
           window.__mcpAgentActive = active;
-          if (active) {
-            overlay.style.display = 'block';
-            messageBox.style.display = 'block';
-          } else {
-            overlay.style.display = 'none';
-            messageBox.style.display = 'none';
-            blockedMessage.style.display = 'none';
+          const overlay = document.getElementById('__mcpAgentOverlay');
+          if (overlay) {
+            if (active) {
+              overlay.style.display = 'block';
+              setTimeout(() => overlay.style.opacity = '1', 10);
+            } else {
+              overlay.style.opacity = '0';
+              setTimeout(() => overlay.style.display = 'none', 300);
+            }
           }
         };
 
-        // Function to show blocked interaction message
-        window.__mcpShowBlockedMessage = () => {
-          if (!window.__mcpAgentActive) return;
-
-          blockedMessage.style.display = 'block';
-          setTimeout(() => {
-            blockedMessage.style.display = 'none';
-          }, 1500);
-        };
-
-        const notify = (event) => {
-          if (window.__mcpAgentActive) {
-            // Agent is active - block interaction and show message
-            event.preventDefault();
-            event.stopPropagation();
-            event.stopImmediatePropagation();
-
-            window.__mcpShowBlockedMessage();
-
-            // Still notify about manual interaction attempt
-            const now = Date.now();
-            if (now - lastNotify > 2000 && window.__mcpManualInteraction) {
-              lastNotify = now;
-              window.__mcpManualInteraction();
+        const intercept = (e) => {
+          // Check session storage real-time in case it changed in another frame
+          if (window.__mcpAgentActive || isStickyActive()) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            
+            // Visual feedback
+            const overlay = document.getElementById('__mcpAgentOverlay');
+            const border = document.getElementById('__mcpAgentPulseBorder');
+            const controlCenter = overlay?.querySelector('div');
+            
+            if (controlCenter) {
+              controlCenter.classList.remove('mcp-shake-small');
+              void controlCenter.offsetWidth;
+              controlCenter.classList.add('mcp-shake-small');
             }
+            if (border) {
+              border.classList.add('mcp-pulse-active');
+              setTimeout(() => border.classList.remove('mcp-pulse-active'), 500);
+            }
+
+            if (window.__mcpManualInteraction) window.__mcpManualInteraction();
             return false;
-          } else {
-            // Agent is not active - allow interaction and notify
-            const now = Date.now();
-            if (now - lastNotify > 2000 && window.__mcpManualInteraction) {
-              lastNotify = now;
-              window.__mcpManualInteraction();
-            }
           }
         };
 
-        // Add event listeners with capture phase to intercept early
-        window.addEventListener("mousedown", notify, true);
-        window.addEventListener("click", notify, true);
-        window.addEventListener("keydown", notify, true);
-        window.addEventListener("keypress", notify, true);
-        window.addEventListener("input", notify, true);
-        window.addEventListener("change", notify, true);
-        window.addEventListener("focus", notify, true);
-        window.addEventListener("blur", notify, true);
+        ['mousedown', 'click', 'mouseup', 'keydown', 'keypress', 'keyup', 'input', 'change', 'focus', 'blur', 'wheel', 'touchstart', 'contextmenu']
+          .forEach(type => window.addEventListener(type, intercept, true));
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', setupUI);
+        } else {
+          setupUI();
+        }
+        
+        // Ensure UI stays on top
+        const observer = new MutationObserver(() => {
+          const overlay = document.getElementById('__mcpAgentOverlay');
+          if (overlay && overlay.parentNode !== document.documentElement) {
+            document.documentElement.appendChild(overlay);
+          }
+        });
+        observer.observe(document.documentElement, { childList: true });
       });
-    } catch (error) {
-      // Silently ignore if already exposed
-    }
+    } catch (error) { /* ignore */ }
   }
 
   async injectVisualFeedback(session) {
@@ -565,7 +588,18 @@ class BrowserService {
     session.lastMousePos = { x, y };
   }
 
-  async waitForSettle(session, timeout = 500) {
+  async waitForSettle(session, policy = "normal") {
+    const timeout = policy === "lazy" ? 100 : policy === "strict" ? 1500 : 500;
+    
+    if (config.turboMode && policy !== "strict") {
+      try {
+        // In Turbo Mode, we wait for networkidle but with a VERY short additional timeout
+        await session.page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => { });
+        await new Promise(r => setTimeout(r, policy === "lazy" ? 20 : 50));
+      } catch { /* ignore */ }
+      return;
+    }
+
     try {
       await session.page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => { });
       await new Promise(r => setTimeout(r, timeout));
@@ -576,6 +610,14 @@ class BrowserService {
     try {
       await session.page.evaluate((v) => {
         window.__mcpAgentActive = v;
+        try {
+          if (v) {
+            sessionStorage.setItem('__mcpAgentActive', 'true');
+          } else {
+            sessionStorage.removeItem('__mcpAgentActive');
+          }
+        } catch (e) { /* incognito or full storage */ }
+
         if (window.__mcpUpdateAgentActive) {
           window.__mcpUpdateAgentActive(v);
         }
@@ -646,18 +688,51 @@ class BrowserService {
 
   async resolveSelector(session, { selector, query, action }) {
     const page = session.page;
+
+    // 1. Strictly prioritize the direct selector if provided
+    if (selector) {
+      try {
+        const locator = page.locator(selector).first();
+        if (await locator.count() > 0 && await locator.isVisible()) {
+          return { selector, strategy: "direct" };
+        }
+      } catch { /* ignore and try candidates */ }
+    }
+
     const candidates = this.buildSelectorCandidates({ selector, query, action });
+
+    if (config.turboMode) {
+      const resolutionPromises = candidates.map(async (candidate) => {
+        try {
+          const locator = page.locator(candidate.selector);
+          const count = await locator.count();
+          if (count > 0 && await locator.first().isVisible()) {
+            return { selector: candidate.selector, strategy: candidate.strategy };
+          }
+        } catch { /* ignore */ }
+        throw new Error("Not found");
+      });
+
+      try {
+        return await Promise.any(resolutionPromises);
+      } catch {
+        // Fallback to query-only if candidates failed
+        if (query) {
+           try {
+             return { selector: `text=${query}`, strategy: "fallback-text" };
+           } catch { /* ignore */ }
+        }
+        throw new Error(`Unable to resolve selector for: "${query || selector}"`);
+      }
+    }
 
     for (const candidate of candidates) {
       try {
         const locator = page.locator(candidate.selector);
-        const visible = await this.isLocatorVisible(locator);
-        if (visible) {
+        if (await this.isLocatorVisible(locator)) {
           return { selector: candidate.selector, strategy: candidate.strategy };
         }
-      } catch {
-        // Skip this candidate
-      }
+      } catch { /* ignore */ }
     }
 
     throw new Error(`Unable to resolve selector for: "${query || selector}"`);
@@ -687,61 +762,51 @@ class BrowserService {
 
   async analyzePageState(session) {
     return session.page.evaluate(() => {
-      const firstText = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80);
+      const firstText = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 50);
+      const isVisible = (el) => {
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0 && el.offsetHeight > 0;
+      };
+
       const selectorHint = (el) => {
-        // IMPORTANT: Many frameworks generate IDs with ":" (e.g. "#:r11:") which are not valid in a raw CSS id selector
-        // without escaping. Use an attribute selector to keep the hint copy-pastable into Playwright/CSS locators.
         if (el.id) return `[id="${String(el.id).replace(/"/g, '\\"')}"]`;
         if (el.getAttribute("name")) return `[name='${String(el.getAttribute("name")).replace(/'/g, "\\'")}']`;
+        const testId = el.getAttribute("data-testid") || el.getAttribute("data-qa");
+        if (testId) return `[data-testid='${testId}']`;
         if (el.className && typeof el.className === "string") return `${el.tagName.toLowerCase()}.${el.className.trim().split(/\s+/)[0]}`;
         return el.tagName.toLowerCase();
       };
 
-      const buttons = Array.from(document.querySelectorAll("button, input[type='button'], input[type='submit'], [role='button']"))
-        .slice(0, 50)
-        .map((el) => ({ text: firstText(el), selector: selectorHint(el), visible: !!(el.offsetWidth || el.offsetHeight) }));
+      const interactive = Array.from(document.querySelectorAll("button, a, input, textarea, select, [role='button'], [onclick]"))
+        .filter(isVisible)
+        .slice(0, 80) // Cap for token efficiency
+        .map((el) => {
+          const tagName = el.tagName.toLowerCase();
+          const info = {
+            tag: tagName,
+            text: firstText(el),
+            selector: selectorHint(el),
+            type: el.getAttribute("type") || undefined,
+            placeholder: el.getAttribute("placeholder") || undefined,
+            aria: el.getAttribute("aria-label") || undefined,
+            required: el.hasAttribute("required") || undefined,
+            disabled: el.disabled || undefined,
+            value: (el.value !== undefined && tagName !== 'select') ? String(el.value).slice(0, 100) : undefined
+          };
 
-      const links = Array.from(document.querySelectorAll("a[href]"))
-        .slice(0, 50)
-        .map((el) => ({ text: firstText(el), href: el.getAttribute("href"), selector: selectorHint(el) }));
+          if (tagName === 'select') {
+            info.options = Array.from(el.options).slice(0, 15).map(o => o.textContent.trim());
+            info.currentValue = el.value;
+          }
 
-      const inputElements = Array.from(document.querySelectorAll("input, textarea, select")).slice(0, 50);
-      const inputs = inputElements.map((el, index) => {
-        const id = el.getAttribute("id");
-        const label = id ? document.querySelector(`label[for="${id}"]`) : null;
-        return {
-          index,
-          selector: selectorHint(el),
-          type: el.getAttribute("type") || el.tagName.toLowerCase(),
-          name: el.getAttribute("name") || "",
-          placeholder: el.getAttribute("placeholder") || "",
-          label: label ? firstText(label) : "",
-          required: el.hasAttribute("required")
-        };
-      });
-
-      const forms = Array.from(document.querySelectorAll("form")).slice(0, 20).map((form, index) => ({
-        index,
-        id: form.id || "",
-        method: (form.getAttribute("method") || "get").toLowerCase(),
-        action: form.getAttribute("action") || "",
-        inputCount: form.querySelectorAll("input, textarea, select").length,
-        buttonCount: form.querySelectorAll("button, input[type='button'], input[type='submit']").length
-      }));
+          return info;
+        });
 
       return {
         title: document.title,
         url: window.location.href,
-        counts: {
-          buttons: buttons.length,
-          links: links.length,
-          forms: forms.length,
-          inputs: inputs.length
-        },
-        buttons,
-        links,
-        forms,
-        inputs
+        interactiveCount: interactive.length,
+        elements: interactive
       };
     });
   }
@@ -777,17 +842,18 @@ class BrowserService {
     const locator = session.page.locator(resolved.selector).first();
     await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
 
-    const box = await locator.boundingBox();
-    if (box) {
-      const centerX = box.x + box.width / 2;
-      const centerY = box.y + box.height / 2;
-      await this.moveMouseNatural(session, { x: centerX, y: centerY });
-      await this.showRipple(session, centerX, centerY);
-      // Small pause after ripple starts but before click for realism
-      await new Promise(r => setTimeout(r, 100));
+    if (!config.turboMode) {
+      const box = await locator.boundingBox();
+      if (box) {
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+        await this.moveMouseNatural(session, { x: centerX, y: centerY });
+        await this.showRipple(session, centerX, centerY);
+        await new Promise(r => setTimeout(r, 100));
+      }
     }
 
-    await locator.click({ timeout: config.defaultTimeoutMs });
+    await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
     await this.waitForSettle(session);
     await this.setAgentActive(session, false);
     this.appendScratchpad(session, `Clicked: "${query || selector}" → ${resolved.strategy}`);
@@ -810,15 +876,29 @@ class BrowserService {
     const locator = session.page.locator(resolved.selector).first();
     await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
 
-    const box = await locator.boundingBox();
-    if (box) {
-      const centerX = box.x + box.width / 2;
-      const centerY = box.y + box.height / 2;
-      await this.moveMouseNatural(session, { x: centerX, y: centerY });
-      await this.showRipple(session, centerX, centerY);
+    // Check if readonly or disabled
+    const isReady = await locator.evaluate(el => {
+      return !el.readOnly && !el.disabled && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.hasAttribute('contenteditable'));
+    });
+
+    if (!isReady) {
+      const status = await locator.evaluate(el => el.readOnly ? "readonly" : el.disabled ? "disabled" : "not-editable");
+      this.appendScratchpad(session, `Skipped typing into ${status} field: "${query || selector}"`);
+      await this.setAgentActive(session, false);
+      return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, status: "skipped", reason: status };
     }
 
-    await locator.click({ timeout: config.defaultTimeoutMs });
+    if (!config.turboMode) {
+      const box = await locator.boundingBox();
+      if (box) {
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+        await this.moveMouseNatural(session, { x: centerX, y: centerY });
+        await this.showRipple(session, centerX, centerY);
+      }
+    }
+
+    await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
     await locator.fill("");
     await locator.fill(String(text));
     await this.waitForSettle(session);
@@ -888,7 +968,12 @@ class BrowserService {
           await locator.click({ timeout: config.defaultTimeoutMs });
           await this.waitForSettle(session, 100);
           await locator.fill("");
-          await locator.fill(String(value));
+          if (config.turboMode) {
+            await locator.fill(String(value));
+          } else {
+            await locator.pressSequentially(String(value), { delay: Math.floor(Math.random() * 40) + 20 });
+            await new Promise(r => setTimeout(r, 300)); // Brief pause purely for visual feedback
+          }
         }
 
         results.push({ field: query, status: "filled", strategy: resolved.strategy });
@@ -911,18 +996,21 @@ class BrowserService {
     };
   }
 
-  async screenshot({ sessionId, fileName, fullPage = false, embedImage = false }) {
+  async screenshot({ sessionId, fileName, fullPage = false, embedImage = false, saveLocal = true }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
 
-    const root = this.sessionScreenshotRoot(session.id);
-    await fs.mkdir(root, { recursive: true });
-    const rawName = fileName || `screenshot-${Date.now()}.png`;
-    const safeName = rawName.replace(/[^\w.\-() ]/g, "_");
-    const absolutePath = path.resolve(root, safeName);
-
     const buffer = await session.page.screenshot({ fullPage });
-    await fs.writeFile(absolutePath, buffer);
+    let absolutePath = "";
+
+    if (saveLocal) {
+      const root = this.sessionScreenshotRoot(session.id);
+      await fs.mkdir(root, { recursive: true });
+      const rawName = fileName || `screenshot-${Date.now()}.png`;
+      const safeName = rawName.replace(/[^\w.\-() ]/g, "_");
+      absolutePath = path.resolve(root, safeName);
+      await fs.writeFile(absolutePath, buffer);
+    }
 
     const metadata = {
       sessionId: session.id,
@@ -930,9 +1018,25 @@ class BrowserService {
       url: session.page.url(),
       timestamp: new Date().toISOString()
     };
-    session.screenshotHistory.push(metadata);
-    this.logAction(session, { action: "screenshot", result: "success", metadata });
-    const result = { sessionId: session.id, path: absolutePath, metadata };
+
+    if (saveLocal) {
+      session.screenshotHistory.push(metadata);
+    }
+
+    this.logAction(session, {
+      action: "screenshot",
+      result: "success",
+      metadata: { ...metadata, saveLocal }
+    });
+
+    const result = {
+      sessionId: session.id,
+      path: absolutePath,
+      filePath: absolutePath,
+      metadata,
+      saveLocal
+    };
+
     if (embedImage) {
       result.imageBase64 = buffer.toString("base64");
     }
@@ -1075,52 +1179,133 @@ class BrowserService {
     if (!session) throw new Error("Session not found");
     const timeout = Number(timeoutMs || config.defaultTimeoutMs);
 
-    if (text) {
-      await session.page.waitForFunction(
-        (needle) => document.body && document.body.innerText.toLowerCase().includes(needle.toLowerCase()),
-        text,
-        { timeout }
-      );
-      this.appendScratchpad(session, `Waited for text: "${text}"`);
-      return { sessionId: session.id, mode: "text", text, timeoutMs: timeout };
+    await this.setAgentActive(session, true);
+    try {
+      if (text) {
+        await session.page.waitForFunction(
+          (needle) => document.body && document.body.innerText.toLowerCase().includes(needle.toLowerCase()),
+          text,
+          { timeout }
+        );
+        this.appendScratchpad(session, `Waited for text: "${text}"`);
+        return { sessionId: session.id, mode: "text", text, timeoutMs: timeout };
+      }
+      if (selector || query) {
+        const resolved = await this.resolveSelector(session, { selector, query, action: "wait" });
+        await session.page.locator(resolved.selector).first().waitFor({ state: "visible", timeout });
+        this.appendScratchpad(session, `Waited for element: "${query || selector}"`);
+        return { sessionId: session.id, mode: "selector", selector: resolved.selector, strategy: resolved.strategy, timeoutMs: timeout };
+      }
+      await session.page.waitForTimeout(timeout);
+      this.appendScratchpad(session, `Waited ${timeout}ms`);
+      return { sessionId: session.id, mode: "timeout", timeoutMs: timeout };
+    } finally {
+      await this.setAgentActive(session, false);
     }
-    if (selector || query) {
-      const resolved = await this.resolveSelector(session, { selector, query, action: "wait" });
-      await session.page.locator(resolved.selector).first().waitFor({ state: "visible", timeout });
-      this.appendScratchpad(session, `Waited for element: "${query || selector}"`);
-      return { sessionId: session.id, mode: "selector", selector: resolved.selector, strategy: resolved.strategy, timeoutMs: timeout };
-    }
-    await session.page.waitForTimeout(timeout);
-    this.appendScratchpad(session, `Waited ${timeout}ms`);
-    return { sessionId: session.id, mode: "timeout", timeoutMs: timeout };
   }
 
   async select({ sessionId, selector, query, value, label, index }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    if (value === undefined && label === undefined && index === undefined) throw new Error("Missing selection target: value, label, or index");
-    const resolved = await this.resolveSelector(session, { selector, query, action: "select" });
-    const option = value !== undefined ? { value: String(value) } : label !== undefined ? { label: String(label) } : { index: Number(index) };
-
-    const locator = session.page.locator(resolved.selector).first();
-    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-
-    const box = await locator.boundingBox();
-    if (box) {
-      const centerX = box.x + box.width / 2;
-      const centerY = box.y + box.height / 2;
-      await this.moveMouseNatural(session, { x: centerX, y: centerY });
-      await this.showRipple(session, centerX, centerY);
+    if (value === undefined && label === undefined && index === undefined) {
+      throw new Error("Missing selection target: value, label, or index");
     }
 
-    await locator.selectOption(option);
-    await this.waitForSettle(session);
+    const resolved = await this.resolveSelector(session, { selector, query, action: "select" });
+    const locator = session.page.locator(resolved.selector).first();
+    const timeout = config.defaultTimeoutMs;
 
+    await locator.waitFor({ state: "visible", timeout });
+
+    const tagName = await locator.evaluate(el => el.tagName.toLowerCase());
+    const option = value !== undefined ? { value: String(value) } : label !== undefined ? { label: String(label) } : { index: Number(index) };
+
+    if (tagName === "select") {
+      // Standard HTML Select
+      try {
+        await locator.selectOption(option, { timeout: 5000 });
+      } catch (err) {
+        // Fallback: If value was provided, try label
+        if (value !== undefined) {
+          try {
+            await locator.selectOption({ label: String(value) }, { timeout: 2000 });
+          } catch { throw err; }
+        } else { throw err; }
+      }
+    } else {
+      // Custom Dropdown (Div/Button based)
+      this.appendScratchpad(session, `  Dropdown is custom (${tagName}), attempting click-and-search...`);
+      
+      // 1. Click to open
+      await locator.click({ timeout: 2000 });
+      await this.waitForSettle(session, "lazy");
+
+      // 2. Look for the option in the DOM
+      const searchText = label || value || "";
+      if (searchText) {
+        const optionLocator = session.page.locator(`text="${searchText}"`).first();
+        if (await optionLocator.isVisible()) {
+          await optionLocator.click({ timeout: 2000 });
+        } else {
+          // Try fuzzy search in likely dropdown containers
+          const fuzzyLocator = session.page.locator(`[role="option"], li, div`).filter({ hasText: searchText }).last();
+          await fuzzyLocator.click({ timeout: 2000 });
+        }
+      } else if (index !== undefined) {
+        // Try to click the Nth child of the revealed container
+        throw new Error("Index-based selection not yet supported for custom dropdowns. Use 'label' or 'value'.");
+      }
+    }
+
+    await this.waitForSettle(session);
     this.appendScratchpad(session, `Selected option in "${query || selector}": ${JSON.stringify(option)}`);
     this.logAction(session, { action: "select", selector: resolved.selector, result: "success", metadata: { option } });
     session.actionHistory.push({ action: "select", target: query || selector, timestamp: new Date().toISOString() });
 
     return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, option };
+  }
+
+  async generatePdf({ sessionId, fileName, format = "A4", landscape = false, printBackground = true }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const root = this.sessionScreenshotRoot(session.id);
+    await fs.mkdir(root, { recursive: true });
+    const rawName = fileName || `export-${Date.now()}.pdf`;
+    const safeName = rawName.endsWith(".pdf") ? rawName : `${rawName}.pdf`;
+    const absolutePath = path.resolve(root, safeName);
+
+    await session.page.pdf({
+      path: absolutePath,
+      format,
+      landscape,
+      printBackground,
+      margin: { top: "20px", bottom: "20px", left: "20px", right: "20px" }
+    });
+
+    const metadata = {
+      sessionId: session.id,
+      path: absolutePath,
+      url: session.page.url(),
+      timestamp: new Date().toISOString()
+    };
+    
+    this.appendScratchpad(session, `Generated PDF: ${safeName}`);
+    this.logAction(session, { action: "generatePdf", result: "success", metadata });
+    return { sessionId: session.id, path: absolutePath, filePath: absolutePath, metadata };
+  }
+
+  async pressKey({ sessionId, key, count = 1, delay = 100 }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    for (let i = 0; i < count; i++) {
+      await session.page.keyboard.press(key, { delay });
+    }
+
+    this.appendScratchpad(session, `Pressed key: ${key} (x${count})`);
+    this.logAction(session, { action: "pressKey", result: "success", metadata: { key, count } });
+    return { sessionId: session.id, key, count };
   }
 
   async upload({ sessionId, selector, query, filePath }) {
@@ -1560,8 +1745,128 @@ class BrowserService {
     };
   }
 
+  async extractBlueprint({ sessionId, selector = "body", maxDepth = 10 }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const blueprint = await session.page.evaluate(async ({ selector, maxDepth, styleKeys }) => {
+      const root = document.querySelector(selector);
+      if (!root) return null;
+
+      const getSafeStyle = (el) => {
+        const cs = getComputedStyle(el);
+        const styles = {};
+        for (const k of styleKeys) {
+          const val = cs.getPropertyValue(k);
+          if (val && val !== "initial" && val !== "none" && val !== "normal" && val !== "0px none rgb(0, 0, 0)") {
+            styles[k] = val;
+          }
+        }
+        return styles;
+      };
+
+      const walk = (el, depth) => {
+        if (depth > maxDepth) return null;
+        
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return null;
+
+        const node = {
+          tag: el.tagName.toLowerCase(),
+          id: el.id || undefined,
+          className: el.className || undefined,
+          box: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+          styles: getSafeStyle(el),
+          attributes: {}
+        };
+
+        // Capture useful attributes
+        for (const attr of el.attributes) {
+          if (["src", "href", "placeholder", "alt", "type", "value"].includes(attr.name)) {
+            node.attributes[attr.name] = attr.value;
+          }
+        }
+
+        // Capture text if no children OR if it's a heading/button
+        const isHeading = /^H[1-6]$/.test(el.tagName);
+        const isButton = el.tagName === "BUTTON" || el.tagName === "A";
+        if (el.children.length === 0 || isHeading || isButton) {
+          const text = el.innerText?.trim();
+          if (text) node.text = text.slice(0, 500);
+        }
+
+        // Recursive walk
+        node.children = [];
+        for (const child of el.children) {
+          const childNode = walk(child, depth + 1);
+          if (childNode) node.children.push(childNode);
+        }
+
+        return node;
+      };
+
+      return {
+        url: window.location.href,
+        title: document.title,
+        viewport: { w: window.innerWidth, h: window.innerHeight },
+        tree: walk(root, 0)
+      };
+    }, { selector, maxDepth, styleKeys: COMPUTED_STYLE_PROPERTY_KEYS });
+
+    this.logAction(session, { action: "extractBlueprint", result: "success", metadata: { selector } });
+    return { sessionId: session.id, blueprint };
+  }
+
+  async getGlobalPalette({ sessionId }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const palette = await session.page.evaluate(() => {
+      const colors = new Set();
+      const fonts = new Set();
+      const bgColors = new Set();
+
+      const all = document.querySelectorAll("*");
+      for (const el of Array.from(all).slice(0, 1000)) {
+        const cs = getComputedStyle(el);
+        const c = cs.getPropertyValue("color");
+        const bg = cs.getPropertyValue("background-color");
+        const f = cs.getPropertyValue("font-family");
+
+        if (c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent") colors.add(c);
+        if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") bgColors.add(bg);
+        if (f) fonts.add(f.split(",")[0].replace(/['"]/g, "").trim());
+      }
+
+      const frequency = (arr) => {
+        const counts = {};
+        arr.forEach(x => counts[x] = (counts[x] || 0) + 1);
+        return Object.entries(counts).sort((a,b) => b[1] - a[1]).slice(0, 10).map(x => x[0]);
+      };
+
+      return {
+        dominantTextColors: frequency(Array.from(colors)),
+        dominantBackgrounds: frequency(Array.from(bgColors)),
+        fontFamilies: frequency(Array.from(fonts))
+      };
+    });
+
+    this.logAction(session, { action: "getGlobalPalette", result: "success" });
+    return { sessionId: session.id, palette };
+  }
+
   async cleanupSession(session) {
     this.appendScratchpad(session, "Cleaning up session artifacts...");
+
+    const removeIfEmpty = async (dirPath) => {
+      try {
+        const abs = path.resolve(dirPath);
+        const files = await fs.readdir(abs);
+        if (files.length === 0) {
+          await fs.rmdir(abs);
+        }
+      } catch { /* ignore */ }
+    };
 
     // 1. Screenshots — remove whole session subfolder when enabled, plus any legacy loose files
     if (config.sessionScreenshotSubdirs) {
@@ -1590,6 +1895,11 @@ class BrowserService {
         await fs.rm(session.userDataDir, { recursive: true, force: true });
       } catch { /* ignore */ }
     }
+
+    // 4. Global root cleanup (if empty)
+    await removeIfEmpty(config.screenshotDir);
+    await removeIfEmpty(config.downloadsDir);
+    await removeIfEmpty("user_data");
   }
 
   async closeSession({ sessionId, cleanup = null }) {

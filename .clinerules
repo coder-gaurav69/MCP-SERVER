@@ -1,0 +1,12 @@
+# Browser Automation MCP Rules
+
+Read `MCP_TOOL_GUIDE.md` first. It is the canonical tool index and usage policy for this project.
+
+- Do not scan the whole repository just to discover tools.
+- Use real MCP tools for browser actions; do not simulate opening, clicking, typing, scrolling, uploading, or screenshots in text.
+- Use `browser_open` for URLs. `open_browser` is a compatibility alias for prompts that use that name.
+- Use `browser_analyze` or `browser_inspect` before acting when page state is unknown.
+- Use `browser_fill_form` for multiple fields instead of repeated `browser_type` calls.
+- Read implementation files only when editing or debugging the server itself.
+- **CRITICAL CALLING RULE**: If you are calling tools via a wrapper like `use_mcp_tool`, you MUST pass the tool arguments inside a `nativeArgs` object (e.g., `nativeArgs: { "url": "..." }`). Failing to do this will cause execution errors.
+
