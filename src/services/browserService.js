@@ -464,6 +464,10 @@ class BrowserService {
         const intercept = (e) => {
           // Check session storage real-time in case it changed in another frame
           if (window.__mcpAgentActive || isStickyActive()) {
+            // Allow MCP/Playwright synthetic events (isTrusted: false) - only block real user events
+            if (!e.isTrusted) {
+              return; // Let MCP/AI agent actions through
+            }
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();

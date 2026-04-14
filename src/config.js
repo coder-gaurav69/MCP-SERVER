@@ -30,7 +30,7 @@ export const config = {
   /** When true, screenshots are stored under screenshots/<sessionId>/ and removed entirely on cleanup. */
   sessionScreenshotSubdirs: toBoolean(process.env.SESSION_SCREENSHOT_SUBDIRS, true),
   downloadsDir: process.env.DOWNLOADS_DIR || "downloads",
-  autoCleanup: toBoolean(process.env.AUTO_CLEANUP, true),
+  autoCleanup: toBoolean(process.env.AUTO_CLEANUP, false),
   defaultViewport: {
     width: Number(process.env.VIEWPORT_WIDTH || 1920),
     height: Number(process.env.VIEWPORT_HEIGHT || 1080)
