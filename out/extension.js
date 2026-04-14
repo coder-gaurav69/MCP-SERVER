@@ -167,7 +167,7 @@ async function getPort(context) {
                 return parseInt(match[1]);
         }
     }
-    return 3000; // Default fallback
+    return 1000; // Default fallback
 }
 /**
  * Kills the active MCP server process.

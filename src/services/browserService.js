@@ -819,7 +819,35 @@ class BrowserService {
         waitUntil: "domcontentloaded",
         timeout: config.defaultTimeoutMs
       });
-      const title = await session.page.title();
+      let title = await session.page.title();
+      
+      const isColdStartProxy = (t) => {
+        const lower = t.toLowerCase();
+        return lower.includes("application loading") || 
+               lower.includes("starting up") || 
+               lower.includes("waking up");
+      };
+
+      if (isColdStartProxy(title)) {
+        this.appendScratchpad(session, `Detected cold start proxy ("${title}"). Waiting for application to wake up...`);
+        try {
+          await session.page.waitForFunction(
+            () => {
+              const lower = document.title.toLowerCase();
+              return !(lower.includes("application loading") || lower.includes("starting up") || lower.includes("waking up"));
+            },
+            { timeout: 60000, polling: 2000 }
+          );
+          
+          await session.page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(()=>{});
+          await this.waitForSettle(session);
+          title = await session.page.title();
+          this.appendScratchpad(session, `Application woke up. New title: "${title}"`);
+        } catch (e) {
+          this.appendScratchpad(session, `Timeout waiting for application to wake up.`);
+        }
+      }
+
       this.appendScratchpad(session, `Opened: ${url} → "${title}"`);
       this.logAction(session, { action: "open", selector: url, result: "success", metadata: { url } });
       session.actionHistory.push({ action: "open", target: url, timestamp: new Date().toISOString() });

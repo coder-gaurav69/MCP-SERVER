@@ -22,11 +22,11 @@ npm install
 npm start
 ```
 
-Server starts on `http://localhost:3000` by default.
+Server starts on `http://localhost:1000` by default.
 
 ## Environment Variables
 
-- `PORT` (default: `3000`)
+- `PORT` (default: `1000`)
 - `HEADLESS` (default: `true`)
 - `DEFAULT_TIMEOUT_MS` (default: `10000`)
 - `MAX_RETRIES` (default: `3`)
@@ -56,13 +56,13 @@ All endpoints return:
 ### 1) Health check
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:1000/health
 ```
 
 ### 2) Open a URL
 
 ```bash
-curl -X POST http://localhost:3000/open ^
+curl -X POST http://localhost:1000/open ^
   -H "Content-Type: application/json" ^
   -d "{\"url\":\"https://example.com\",\"headless\":true}"
 ```
@@ -72,13 +72,13 @@ Response includes `data.sessionId`. Save it for next calls.
 ### 3) Analyze page DOM
 
 ```bash
-curl "http://localhost:3000/analyze?sessionId=YOUR_SESSION_ID"
+curl "http://localhost:1000/analyze?sessionId=YOUR_SESSION_ID"
 ```
 
 ### 4) Click an element
 
 ```bash
-curl -X POST http://localhost:3000/click ^
+curl -X POST http://localhost:1000/click ^
   -H "Content-Type: application/json" ^
   -d "{\"sessionId\":\"YOUR_SESSION_ID\",\"selector\":\"a[href='https://www.iana.org/domains/example']\"}"
 ```
@@ -86,7 +86,7 @@ curl -X POST http://localhost:3000/click ^
 ### 5) Type into an input
 
 ```bash
-curl -X POST http://localhost:3000/type ^
+curl -X POST http://localhost:1000/type ^
   -H "Content-Type: application/json" ^
   -d "{\"sessionId\":\"YOUR_SESSION_ID\",\"selector\":\"input[name='q']\",\"text\":\"playwright automation\"}"
 ```
@@ -94,7 +94,7 @@ curl -X POST http://localhost:3000/type ^
 ### 6) Scroll page
 
 ```bash
-curl -X POST http://localhost:3000/scroll ^
+curl -X POST http://localhost:1000/scroll ^
   -H "Content-Type: application/json" ^
   -d "{\"sessionId\":\"YOUR_SESSION_ID\",\"pixels\":800}"
 ```
@@ -102,25 +102,25 @@ curl -X POST http://localhost:3000/scroll ^
 ### 7) Capture screenshot
 
 ```bash
-curl "http://localhost:3000/screenshot?sessionId=YOUR_SESSION_ID&fileName=example.png"
+curl "http://localhost:1000/screenshot?sessionId=YOUR_SESSION_ID&fileName=example.png"
 ```
 
 ### 8) Read console/network failures
 
 ```bash
-curl "http://localhost:3000/errors?sessionId=YOUR_SESSION_ID"
+curl "http://localhost:1000/errors?sessionId=YOUR_SESSION_ID"
 ```
 
 ### 9) List sessions
 
 ```bash
-curl http://localhost:3000/sessions
+curl http://localhost:1000/sessions
 ```
 
 ### 10) Close a session
 
 ```bash
-curl -X DELETE http://localhost:3000/session/YOUR_SESSION_ID
+curl -X DELETE http://localhost:1000/session/YOUR_SESSION_ID
 ```
 
 ## Agent Activity & Manual Interaction Blocking

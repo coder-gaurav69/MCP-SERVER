@@ -5,6 +5,7 @@ Read this file first when using this MCP server. It is the canonical one-file in
 ## Strict Agent Rules
 
 - Always check the available MCP tools before answering a task.
+- NEVER attempt to read executable tools as resources (e.g., trying to read `mcp://browser-automation/browser_open`). Tools MUST be called via the tool execution interface, not the resource read interface. Tools are actions, not statically readable URIs.
 - If a real MCP tool can perform the action, call the tool. Do not simulate opening a browser, clicking, typing, scrolling, uploading, or taking screenshots in text.
 - If a URL is mentioned and the task is to open, test, inspect, debug, or interact with it, use `browser_open`.
 - `open_browser` is a compatibility alias for prompts that use that name. New prompts should prefer `browser_open`.
@@ -24,10 +25,10 @@ Read this file first when using this MCP server. It is the canonical one-file in
 
 ## First Call
 
-- MCP resource: `mcp://browser-automation/tool-guide`
-- MCP tool: `browser_tool_guide`
+To retrieve this guide from the running MCP server without reading random project files, simply execute the tool:
+- **MCP tool:** `browser_tool_guide`
 
-Use either of these to retrieve this guide from the running MCP server without reading random project files.
+*(Note: Do not try to access this as an `mcp://` URI resource unless specifically instructed by your core system prompt. The safest method is always calling the tool).*
 
 ## Recommended Workflow
 

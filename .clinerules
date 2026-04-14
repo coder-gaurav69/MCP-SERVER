@@ -9,4 +9,4 @@ Read `MCP_TOOL_GUIDE.md` first. It is the canonical tool index and usage policy 
 - Use `browser_fill_form` for multiple fields instead of repeated `browser_type` calls.
 - Read implementation files only when editing or debugging the server itself.
 - **CRITICAL CALLING RULE**: If you are calling tools via a wrapper like `use_mcp_tool`, you MUST pass the tool arguments inside a `nativeArgs` object (e.g., `nativeArgs: { "url": "..." }`). Failing to do this will cause execution errors.
-
+- **CRITICAL RESOURCE RULE**: NEVER try to access executable tools as MCP resources by treating them as URIs (e.g. `mcp://browser-automation/browser_open` is INVALID). Tools like `browser_open` are executable actions, NOT read-only resources. Always call them as tools!

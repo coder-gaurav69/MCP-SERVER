@@ -9,7 +9,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+
 import { z } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -61,25 +61,22 @@ server.registerResource(
 );
 
 const tool = (name, description, schema, handler) => {
-  if (schema && typeof schema === "object") {
-    for (const [key, value] of Object.entries(schema)) {
-      if (value === undefined) {
-        throw new Error(`Tool ${name} has undefined schema for key: ${key}`);
-      }
-    }
-  }
+  let validSchema;
   try {
-    // Validates schema shape and catches mixed/invalid Zod objects early.
-    normalizeObjectSchema(schema ?? {});
+    validSchema = z.object(schema ?? {});
   } catch (error) {
     throw new Error(
       `Tool ${name} has an invalid input schema: ${error instanceof Error ? error.message : String(error)
       }`
     );
   }
-  server.tool(name, description, schema ?? {}, async (args) => {
+  
+  server.registerTool(name, {
+    description,
+    inputSchema: validSchema
+  }, async (params) => {
     try {
-      const data = await handler(args ?? {});
+      const data = await handler(params ?? {});
       return { content: jsonText({ ok: true, data }) };
     } catch (error) {
       return {
@@ -98,7 +95,7 @@ const tool = (name, description, schema, handler) => {
 tool(
   "browser_tool_guide",
   "Read this first. Returns the canonical one-file guide for available tools and usage rules.",
-  {},
+  z.object({}),
   async () => ({ resourceUri: TOOL_GUIDE_URI, guide: await readToolGuide() })
 );
 
@@ -111,7 +108,7 @@ tool(
     headless: z.boolean().optional(),
     persist: z.boolean().optional()
   },
-  ({ sessionId, url, headless, persist }) => browserService.openUrl({ sessionId, url, headless, persist })
+  (params) => browserService.openUrl(params)
 );
 
 tool(
@@ -123,7 +120,7 @@ tool(
     headless: z.boolean().optional(),
     persist: z.boolean().optional()
   },
-  ({ sessionId, url, headless, persist }) => browserService.openUrl({ sessionId, url, headless, persist })
+  (params) => browserService.openUrl(params)
 );
 
 tool(
@@ -359,7 +356,7 @@ tool(
 );
 
 {
-  const screenshotSchema = {
+  const screenshotSchema = z.object({
     sessionId: z.string(),
     fileName: z.string().optional(),
     fullPage: z.boolean().optional(),
@@ -373,12 +370,13 @@ tool(
       .optional()
       .default(false)
       .describe("When true, also saves the screenshot to the server's local disk. Default is false to keep your drive clean.")
-  };
-  normalizeObjectSchema(screenshotSchema);
-  server.tool(
+  });
+  server.registerTool(
     "browser_screenshot",
-    "Take a screenshot. By default, it returns the image directly to your chat (embedImage=true) and DOES NOT save it to disk (saveLocal=false).",
-    screenshotSchema,
+    {
+      description: "Take a screenshot. By default, it returns the image directly to your chat (embedImage=true) and DOES NOT save it to disk (saveLocal=false).",
+      inputSchema: screenshotSchema
+    },
     async (args) => {
       const { sessionId, fileName, fullPage, embedImage, saveLocal } = args ?? {};
       try {
@@ -498,6 +496,14 @@ if (isMainModule()) {
     // Write to stderr so we don't pollute MCP stdio transport (which uses stdout)
     console.error(`[INFO] Dashboard & REST API listening on http://${config.host}:${config.port}`);
     console.error(`[INFO] Transport mode: Stdio (primary) + HTTP (secondary)`);
+  });
+
+  httpServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[WARNING] Port ${config.port} is already in use by another instance! Skipping HTTP Dashboard... but MCP Stdio will continue to work perfectly.`);
+    } else {
+      console.error(`[ERROR] HTTP Server Error:`, err);
+    }
   });
 
   // Final cleanup on process exit

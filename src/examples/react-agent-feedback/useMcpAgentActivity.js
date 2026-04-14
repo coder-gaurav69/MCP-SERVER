@@ -1,12 +1,12 @@
 import { useEffect } from "react";
-import { useAgentActivity } from "./AgentActivityProvider";
+import { useAgentActivity } from "./AgentActivityProvider.js";
 
 function toLabel(action) {
   if (!action) return "Agent is working...";
   return `${String(action).replace(/[_-]/g, " ").trim()}...`;
 }
 
-export function useMcpAgentActivity(mcpBaseUrl = "http://localhost:3000") {
+export function useMcpAgentActivity(mcpBaseUrl = "http://localhost:1000") {
   const { startAgentWork, endAgentWork } = useAgentActivity();
 
   useEffect(() => {
@@ -32,7 +32,7 @@ export function useMcpAgentActivity(mcpBaseUrl = "http://localhost:3000") {
 }
 
 export async function runMcpToolCall({
-  mcpBaseUrl = "http://localhost:3000",
+  mcpBaseUrl = "http://localhost:1000",
   endpoint,
   body,
   method = "POST",

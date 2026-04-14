@@ -194,7 +194,7 @@ async function getPort(context: vscode.ExtensionContext): Promise<number> {
             if (match) return parseInt(match[1]);
         }
     }
-    return 3000; // Default fallback
+    return 1000; // Default fallback
 }
 
 /**

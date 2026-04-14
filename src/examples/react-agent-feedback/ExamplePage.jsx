@@ -9,7 +9,7 @@ function DemoForm() {
   const [selector, setSelector] = useState("text=More information...");
   const { startAgentWork, endAgentWork, isAgentWorking } = useAgentActivity();
 
-  useMcpAgentActivity("http://localhost:3000");
+  useMcpAgentActivity("http://localhost:1000");
 
   const onOpen = async () => {
     const result = await runMcpToolCall({
