@@ -122,9 +122,33 @@ class BrowserService {
     return { navigatedVia: "click" };
   }
 
+  /** Find an existing session on the same origin. Returns session or null. */
+  findSessionByDomain(url) {
+    if (!url || !config.sessionReuse) return null;
+    try {
+      const targetOrigin = new URL(url).origin;
+      for (const [, session] of this.sessions) {
+        try {
+          const sessionOrigin = new URL(session.page.url()).origin;
+          if (sessionOrigin === targetOrigin) return session;
+        } catch { /* ignore dead sessions */ }
+      }
+    } catch { /* invalid url */ }
+    return null;
+  }
+
   async getOrCreateSession(sessionId, options = {}) {
     if (sessionId && this.sessions.has(sessionId)) {
       return this.sessions.get(sessionId);
+    }
+
+    // Smart session reuse: prefer existing session for same domain
+    if (!sessionId && options.url && config.sessionReuse) {
+      const existing = this.findSessionByDomain(options.url);
+      if (existing) {
+        this.appendScratchpad(existing, `♻ Reusing session ${existing.id} for ${options.url}`);
+        return existing;
+      }
     }
 
     const effectiveSessionId = sessionId || uuidv4();
@@ -293,6 +317,15 @@ class BrowserService {
           timestamp: new Date().toISOString(),
           error: error instanceof Error ? error.message : String(error || "Unknown download error")
         });
+      }
+    });
+
+    // Re-inject interaction lock on page navigations (covers SPA pushState/replaceState)
+    page.on("framenavigated", async (frame) => {
+      if (frame === page.mainFrame() && config.interactionLock) {
+        try {
+          await this.setAgentActive(session, session._agentActive || false);
+        } catch { /* page may be mid-navigation */ }
       }
     });
 
@@ -611,6 +644,7 @@ class BrowserService {
   }
 
   async setAgentActive(session, active) {
+    session._agentActive = active;
     try {
       await session.page.evaluate((v) => {
         window.__mcpAgentActive = v;
@@ -629,6 +663,18 @@ class BrowserService {
     } catch { /* ignore */ }
   }
 
+  /**
+   * Wraps an async function with interaction lock.
+   * Ensures setAgentActive(true/false) is always toggled via try/finally.
+   */
+  async withAgentLock(session, fn) {
+    await this.setAgentActive(session, true);
+    try {
+      return await fn();
+    } finally {
+      await this.setAgentActive(session, false);
+    }
+  }
 
   tokenize(text = "") {
     const stopWords = new Set(["click", "type", "into", "in", "on", "the", "a", "an", "button", "field", "input", "to", "select"]);
@@ -816,7 +862,7 @@ class BrowserService {
   }
 
   async openUrl({ sessionId, url, headless, persist }) {
-    const session = await this.getOrCreateSession(sessionId, { headless, persist });
+    const session = await this.getOrCreateSession(sessionId, { headless, persist, url });
     await this.setAgentActive(session, true);
     try {
       await session.page.goto(url, {
@@ -868,84 +914,83 @@ class BrowserService {
   async click({ sessionId, selector, query }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    await this.setAgentActive(session, true);
-    const resolved = await this.resolveSelector(session, { selector, query, action: "click" });
+    return this.withAgentLock(session, async () => {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "click" });
 
-    const locator = session.page.locator(resolved.selector).first();
-    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+      const locator = session.page.locator(resolved.selector).first();
+      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
 
-    if (!config.turboMode) {
-      const box = await locator.boundingBox();
-      if (box) {
-        const centerX = box.x + box.width / 2;
-        const centerY = box.y + box.height / 2;
-        await this.moveMouseNatural(session, { x: centerX, y: centerY });
-        await this.showRipple(session, centerX, centerY);
-        await new Promise(r => setTimeout(r, 100));
+      if (!config.turboMode) {
+        const box = await locator.boundingBox();
+        if (box) {
+          const centerX = box.x + box.width / 2;
+          const centerY = box.y + box.height / 2;
+          await this.moveMouseNatural(session, { x: centerX, y: centerY });
+          await this.showRipple(session, centerX, centerY);
+          await new Promise(r => setTimeout(r, 100));
+        }
       }
-    }
 
-    await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
-    await this.waitForSettle(session);
-    await this.setAgentActive(session, false);
-    this.appendScratchpad(session, `Clicked: "${query || selector}" → ${resolved.strategy}`);
-    this.logAction(session, { action: "click", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy } });
-    session.actionHistory.push({ action: "click", target: query || selector, timestamp: new Date().toISOString() });
+      await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
+      await this.waitForSettle(session);
+      this.appendScratchpad(session, `Clicked: "${query || selector}" → ${resolved.strategy}`);
+      this.logAction(session, { action: "click", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy } });
+      session.actionHistory.push({ action: "click", target: query || selector, timestamp: new Date().toISOString() });
 
-    return {
-      sessionId: session.id,
-      selector: resolved.selector,
-      strategy: resolved.strategy
-    };
+      return {
+        sessionId: session.id,
+        selector: resolved.selector,
+        strategy: resolved.strategy
+      };
+    });
   }
 
   async type({ sessionId, selector, text, query }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    await this.setAgentActive(session, true);
-    const resolved = await this.resolveSelector(session, { selector, query, action: "type" });
+    return this.withAgentLock(session, async () => {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "type" });
 
-    const locator = session.page.locator(resolved.selector).first();
-    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+      const locator = session.page.locator(resolved.selector).first();
+      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
 
-    // Check if readonly or disabled
-    const isReady = await locator.evaluate(el => {
-      return !el.readOnly && !el.disabled && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.hasAttribute('contenteditable'));
-    });
+      // Check if readonly or disabled
+      const isReady = await locator.evaluate(el => {
+        return !el.readOnly && !el.disabled && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.hasAttribute('contenteditable'));
+      });
 
-    if (!isReady) {
-      const status = await locator.evaluate(el => el.readOnly ? "readonly" : el.disabled ? "disabled" : "not-editable");
-      this.appendScratchpad(session, `Skipped typing into ${status} field: "${query || selector}"`);
-      await this.setAgentActive(session, false);
-      return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, status: "skipped", reason: status };
-    }
-
-    if (!config.turboMode) {
-      const box = await locator.boundingBox();
-      if (box) {
-        const centerX = box.x + box.width / 2;
-        const centerY = box.y + box.height / 2;
-        await this.moveMouseNatural(session, { x: centerX, y: centerY });
-        await this.showRipple(session, centerX, centerY);
+      if (!isReady) {
+        const status = await locator.evaluate(el => el.readOnly ? "readonly" : el.disabled ? "disabled" : "not-editable");
+        this.appendScratchpad(session, `Skipped typing into ${status} field: "${query || selector}"`);
+        return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, status: "skipped", reason: status };
       }
-    }
 
-    await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
-    await locator.fill("");
-    await locator.fill(String(text));
-    await this.waitForSettle(session);
-    await this.setAgentActive(session, false);
+      if (!config.turboMode) {
+        const box = await locator.boundingBox();
+        if (box) {
+          const centerX = box.x + box.width / 2;
+          const centerY = box.y + box.height / 2;
+          await this.moveMouseNatural(session, { x: centerX, y: centerY });
+          await this.showRipple(session, centerX, centerY);
+        }
+      }
 
-    this.appendScratchpad(session, `Typed into "${query || selector}": "${String(text).slice(0, 30)}..."`);
-    this.logAction(session, { action: "type", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy, textLength: text.length } });
-    session.actionHistory.push({ action: "type", target: query || selector, timestamp: new Date().toISOString() });
+      await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
+      await locator.fill("");
+      await locator.fill(String(text));
+      await this.waitForSettle(session);
 
-    return {
-      sessionId: session.id,
-      selector: resolved.selector,
-      strategy: resolved.strategy,
-      typedLength: text.length
-    };
+      this.appendScratchpad(session, `Typed into "${query || selector}": "${String(text).slice(0, 30)}..."`);
+      this.logAction(session, { action: "type", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy, textLength: text.length } });
+      session.actionHistory.push({ action: "type", target: query || selector, timestamp: new Date().toISOString() });
+
+      return {
+        sessionId: session.id,
+        selector: resolved.selector,
+        strategy: resolved.strategy,
+        typedLength: text.length
+      };
+    });
   }
 
   async fillForm({ sessionId, fields }) {
@@ -1175,35 +1220,39 @@ class BrowserService {
   async scroll({ sessionId, pixels = 600 }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    await session.page.mouse.wheel(0, pixels);
-    this.appendScratchpad(session, `Scrolled ${pixels}px`);
-    this.logAction(session, { action: "scroll", result: "success", metadata: { pixels } });
-    session.actionHistory.push({ action: "scroll", target: String(pixels), timestamp: new Date().toISOString() });
-    return { sessionId: session.id, pixels };
+    return this.withAgentLock(session, async () => {
+      await session.page.mouse.wheel(0, pixels);
+      this.appendScratchpad(session, `Scrolled ${pixels}px`);
+      this.logAction(session, { action: "scroll", result: "success", metadata: { pixels } });
+      session.actionHistory.push({ action: "scroll", target: String(pixels), timestamp: new Date().toISOString() });
+      return { sessionId: session.id, pixels };
+    });
   }
 
   async hover({ sessionId, selector, query }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    const resolved = await this.resolveSelector(session, { selector, query, action: "hover" });
+    return this.withAgentLock(session, async () => {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "hover" });
 
-    const locator = session.page.locator(resolved.selector).first();
-    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+      const locator = session.page.locator(resolved.selector).first();
+      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
 
-    const box = await locator.boundingBox();
-    if (box) {
-      const centerX = box.x + box.width / 2;
-      const centerY = box.y + box.height / 2;
-      await this.moveMouseNatural(session, { x: centerX, y: centerY });
-      await this.showRipple(session, centerX, centerY);
-    }
+      const box = await locator.boundingBox();
+      if (box) {
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+        await this.moveMouseNatural(session, { x: centerX, y: centerY });
+        await this.showRipple(session, centerX, centerY);
+      }
 
-    await locator.hover();
-    this.appendScratchpad(session, `Hovered: "${query || selector}"`);
-    this.logAction(session, { action: "hover", selector: resolved.selector, result: "success", metadata: { query } });
-    session.actionHistory.push({ action: "hover", target: query || selector, timestamp: new Date().toISOString() });
+      await locator.hover();
+      this.appendScratchpad(session, `Hovered: "${query || selector}"`);
+      this.logAction(session, { action: "hover", selector: resolved.selector, result: "success", metadata: { query } });
+      session.actionHistory.push({ action: "hover", target: query || selector, timestamp: new Date().toISOString() });
 
-    return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy };
+      return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy };
+    });
   }
 
   async wait({ sessionId, selector, query, text, timeoutMs }) {
@@ -1330,32 +1379,34 @@ class BrowserService {
   async pressKey({ sessionId, key, count = 1, delay = 100 }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-
-    for (let i = 0; i < count; i++) {
-      await session.page.keyboard.press(key, { delay });
-    }
-
-    this.appendScratchpad(session, `Pressed key: ${key} (x${count})`);
-    this.logAction(session, { action: "pressKey", result: "success", metadata: { key, count } });
-    return { sessionId: session.id, key, count };
+    return this.withAgentLock(session, async () => {
+      for (let i = 0; i < count; i++) {
+        await session.page.keyboard.press(key, { delay });
+      }
+      this.appendScratchpad(session, `Pressed key: ${key} (x${count})`);
+      this.logAction(session, { action: "pressKey", result: "success", metadata: { key, count } });
+      return { sessionId: session.id, key, count };
+    });
   }
 
   async upload({ sessionId, selector, query, filePath }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
     if (!filePath) throw new Error("Missing required field: filePath");
-    const resolved = await this.resolveSelector(session, { selector, query, action: "upload" });
-    const absoluteFilePath = path.resolve(filePath);
+    return this.withAgentLock(session, async () => {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "upload" });
+      const absoluteFilePath = path.resolve(filePath);
 
-    const locator = session.page.locator(resolved.selector).first();
-    await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-    await locator.setInputFiles(absoluteFilePath);
+      const locator = session.page.locator(resolved.selector).first();
+      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+      await locator.setInputFiles(absoluteFilePath);
 
-    this.appendScratchpad(session, `Uploaded file: "${absoluteFilePath}"`);
-    this.logAction(session, { action: "upload", selector: resolved.selector, result: "success", metadata: { filePath: absoluteFilePath } });
-    session.actionHistory.push({ action: "upload", target: query || selector, timestamp: new Date().toISOString() });
+      this.appendScratchpad(session, `Uploaded file: "${absoluteFilePath}"`);
+      this.logAction(session, { action: "upload", selector: resolved.selector, result: "success", metadata: { filePath: absoluteFilePath } });
+      session.actionHistory.push({ action: "upload", target: query || selector, timestamp: new Date().toISOString() });
 
-    return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, filePath: absoluteFilePath };
+      return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, filePath: absoluteFilePath };
+    });
   }
 
   getGoalPlan(goal, payload = {}) {
@@ -1951,6 +2002,266 @@ class BrowserService {
 
     this.sessions.delete(sessionId);
     return { sessionId, cleanedUp: !!shouldCleanup };
+  }
+
+  // ─── Session Recovery ─────────────────────────────────
+
+  async reconnectSession({ sessionId }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    // Check if the page is still alive
+    let alive = false;
+    try {
+      await session.page.title();
+      alive = true;
+    } catch { /* page crashed or closed */ }
+
+    if (!alive) {
+      // Try to recover by creating a new page in the same context
+      try {
+        session.page = await session.context.newPage();
+        await this.injectInteractionMonitor(session);
+        this.appendScratchpad(session, "⚡ Session reconnected — new page created");
+      } catch (err) {
+        throw new Error(`Cannot reconnect session: ${err.message}`);
+      }
+    } else {
+      // Re-inject monitor in case it was lost
+      await this.injectInteractionMonitor(session);
+      this.appendScratchpad(session, "✓ Session is alive and monitor re-injected");
+    }
+
+    return {
+      sessionId: session.id,
+      alive,
+      currentUrl: session.page.url(),
+      actionCount: session.actionHistory.length
+    };
+  }
+
+  // ─── Deep Clone — Pixel-Perfect Extraction ───────────
+
+  async deepClone({ sessionId, selector = "body" }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const keys = COMPUTED_STYLE_PROPERTY_KEYS;
+
+    const extraction = await session.page.evaluate(async ({ selector, styleKeys }) => {
+      const root = document.querySelector(selector);
+      if (!root) return null;
+
+      // 1. Extract ALL stylesheet rules (including :hover, :focus, @keyframes, @media)
+      const allCSS = [];
+      for (const sheet of document.styleSheets) {
+        try {
+          for (const rule of sheet.cssRules || []) {
+            allCSS.push(rule.cssText);
+          }
+        } catch { /* cross-origin stylesheet, skip */ }
+      }
+
+      // 2. Extract @font-face declarations
+      const fontFaces = [];
+      for (const sheet of document.styleSheets) {
+        try {
+          for (const rule of sheet.cssRules || []) {
+            if (rule instanceof CSSFontFaceRule) {
+              fontFaces.push(rule.cssText);
+            }
+          }
+        } catch { /* skip */ }
+      }
+
+      // 3. Extract all asset URLs
+      const assets = {
+        images: [],
+        backgroundImages: [],
+        svgs: [],
+        icons: []
+      };
+
+      // Images
+      document.querySelectorAll("img[src]").forEach(img => {
+        assets.images.push({ src: img.src, alt: img.alt || "", width: img.naturalWidth, height: img.naturalHeight });
+      });
+
+      // Background images
+      const allEls = document.querySelectorAll("*");
+      for (const el of Array.from(allEls).slice(0, 2000)) {
+        const bg = getComputedStyle(el).backgroundImage;
+        if (bg && bg !== "none") {
+          const urls = bg.match(/url\(["']?([^"')]+)["']?\)/g);
+          if (urls) urls.forEach(u => assets.backgroundImages.push(u));
+        }
+      }
+
+      // Inline SVGs
+      document.querySelectorAll("svg").forEach((svg, i) => {
+        if (i < 50) assets.svgs.push(svg.outerHTML.slice(0, 5000));
+      });
+
+      // Icons
+      document.querySelectorAll('link[rel*="icon"]').forEach(link => {
+        assets.icons.push({ rel: link.rel, href: link.href, sizes: link.sizes?.value || "" });
+      });
+
+      // 4. Extract pseudo-state CSS rules (:hover, :focus, :active)
+      const pseudoRules = [];
+      for (const sheet of document.styleSheets) {
+        try {
+          for (const rule of sheet.cssRules || []) {
+            if (rule.selectorText && /:hover|:focus|:active|:visited|::before|::after/.test(rule.selectorText)) {
+              pseudoRules.push(rule.cssText);
+            }
+          }
+        } catch { /* skip */ }
+      }
+
+      // 5. Extract @keyframes animations
+      const animations = [];
+      for (const sheet of document.styleSheets) {
+        try {
+          for (const rule of sheet.cssRules || []) {
+            if (rule instanceof CSSKeyframesRule) {
+              animations.push(rule.cssText);
+            }
+          }
+        } catch { /* skip */ }
+      }
+
+      // 6. Extract meta + links
+      const meta = {};
+      document.querySelectorAll("meta").forEach(m => {
+        const name = m.getAttribute("name") || m.getAttribute("property") || "";
+        if (name) meta[name] = m.content || "";
+      });
+
+      const externalCSS = [];
+      document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+        externalCSS.push(link.href);
+      });
+
+      const externalFonts = [];
+      document.querySelectorAll('link[href*="fonts"]').forEach(link => {
+        externalFonts.push(link.href);
+      });
+
+      // 7. Build DOM tree with computed styles
+      const getSafeStyle = (el) => {
+        const cs = getComputedStyle(el);
+        const styles = {};
+        for (const k of styleKeys) {
+          const val = cs.getPropertyValue(k);
+          if (val && val !== "initial" && val !== "none" && val !== "normal") {
+            styles[k] = val;
+          }
+        }
+        return styles;
+      };
+
+      const walk = (el, depth) => {
+        if (depth > 12) return null;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return null;
+
+        const node = {
+          tag: el.tagName.toLowerCase(),
+          id: el.id || undefined,
+          className: typeof el.className === "string" ? el.className : undefined,
+          text: el.children.length === 0 ? (el.innerText || "").trim().slice(0, 300) : undefined,
+          box: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+          styles: getSafeStyle(el),
+          attributes: {},
+          children: []
+        };
+
+        for (const attr of el.attributes) {
+          if (["src", "href", "placeholder", "alt", "type", "value", "role", "aria-label", "data-testid"].includes(attr.name)) {
+            node.attributes[attr.name] = attr.value;
+          }
+        }
+
+        for (const child of el.children) {
+          const childNode = walk(child, depth + 1);
+          if (childNode) node.children.push(childNode);
+        }
+        return node;
+      };
+
+      return {
+        url: window.location.href,
+        title: document.title,
+        viewport: { w: window.innerWidth, h: window.innerHeight },
+        meta,
+        externalCSS,
+        externalFonts,
+        allCSS: allCSS.slice(0, 5000),
+        pseudoRules: pseudoRules.slice(0, 500),
+        animations: animations.slice(0, 100),
+        fontFaces: fontFaces.slice(0, 50),
+        assets,
+        domTree: walk(root, 0)
+      };
+    }, { selector, styleKeys: keys });
+
+    if (!extraction) {
+      throw new Error(`Selector "${selector}" not found on page`);
+    }
+
+    // Take a reference screenshot for later comparison
+    const referenceScreenshot = await session.page.screenshot({ fullPage: true });
+    const screenshotRoot = this.sessionScreenshotRoot(session.id);
+    await fs.mkdir(screenshotRoot, { recursive: true });
+    const refPath = path.resolve(screenshotRoot, `deepclone-reference-${Date.now()}.png`);
+    await fs.writeFile(refPath, referenceScreenshot);
+
+    this.appendScratchpad(session, `Deep clone extracted: ${extraction.allCSS.length} CSS rules, ${extraction.pseudoRules.length} pseudo rules, ${extraction.animations.length} animations`);
+    this.logAction(session, { action: "deepClone", result: "success", metadata: { selector } });
+
+    return {
+      sessionId: session.id,
+      referenceScreenshotPath: refPath,
+      extraction
+    };
+  }
+
+  // ─── Hover Effect Capture (for Vision AI) ────────────
+
+  async captureHoverEffect({ sessionId, selector, query }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    return this.withAgentLock(session, async () => {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "hover" });
+      const locator = session.page.locator(resolved.selector).first();
+      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+
+      // Take BEFORE screenshot
+      const beforeBuffer = await session.page.screenshot({ fullPage: false });
+
+      // Hover the element
+      const box = await locator.boundingBox();
+      if (box) {
+        await this.moveMouseNatural(session, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+      }
+      await locator.hover();
+      await new Promise(r => setTimeout(r, 500)); // Wait for CSS transitions
+
+      // Take AFTER screenshot
+      const afterBuffer = await session.page.screenshot({ fullPage: false });
+
+      this.appendScratchpad(session, `Captured hover effect on "${query || selector}"`);
+
+      return {
+        sessionId: session.id,
+        selector: resolved.selector,
+        strategy: resolved.strategy,
+        beforeBuffer,
+        afterBuffer
+      };
+    });
   }
 
   async closeAll() {

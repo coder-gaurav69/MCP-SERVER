@@ -37,5 +37,18 @@ export const config = {
   },
   stealthMode: toBoolean(process.env.STEALTH_MODE, true),
   turboMode: toBoolean(process.env.TURBO_MODE, true),
-  interactionLock: toBoolean(process.env.INTERACTION_LOCK, true)
+  interactionLock: toBoolean(process.env.INTERACTION_LOCK, true),
+
+  // ─── Vision AI (Gemini Flash) ────────────────────────────
+  visionEnabled: toBoolean(process.env.VISION_ENABLED, true),
+  geminiApiKey: process.env.GEMINI_API_KEY || "",
+  visionModel: process.env.VISION_MODEL || "gemini-2.0-flash",
+  visionMaxTokens: Number(process.env.VISION_MAX_TOKENS || 4096),
+
+  // ─── Agent Scratchpad ────────────────────────────────────
+  scratchpadDir: process.env.SCRATCHPAD_DIR || ".scratchpad",
+
+  // ─── Session Persistence ─────────────────────────────────
+  /** When true, browser_open will reuse an existing session for the same domain instead of creating a new one. */
+  sessionReuse: toBoolean(process.env.SESSION_REUSE, true)
 };

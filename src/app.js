@@ -1,9 +1,14 @@
 import express from "express";
 import morgan from "morgan";
+import path from "node:path";
 import browserRoutes from "./routes/browserRoutes.js";
-import { failure } from "./utils/response.js";
+import { success, failure } from "./utils/response.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { server as mcpServer } from "./mcpServer.js";
+import { registerAllTools, serverMetadata, toolsRegistry } from "./mcpServer.js";
+import { scratchpadService } from "./services/scratchpadService.js";
+import { config } from "./config.js";
+import { z } from "zod";
 
 
 
@@ -12,6 +17,128 @@ export function createApp() {
 
   app.use(express.json({ limit: "1mb" }));
   app.use(morgan("combined"));
+
+  // ─── Scratchpad File Serving ─────────────────────────────
+  app.get("/scratchpad/:sessionId/:filename", async (req, res) => {
+    try {
+      const { sessionId, filename } = req.params;
+      const fileData = await scratchpadService.readFile(sessionId, filename);
+
+      // Determine content type
+      const ext = path.extname(filename).toLowerCase();
+      const contentTypes = {
+        ".html": "text/html",
+        ".htm": "text/html",
+        ".css": "text/css",
+        ".js": "application/javascript",
+        ".json": "application/json",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".txt": "text/plain",
+        ".md": "text/markdown"
+      };
+      res.setHeader("Content-Type", contentTypes[ext] || "text/plain; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.send(fileData.content);
+    } catch (error) {
+      res.status(404).json(failure("scratchpad", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  // ─── Screenshot Image Serving ────────────────────────────
+  app.get("/screenshot/image", async (req, res) => {
+    try {
+      const { browserService } = await import("./services/browserService.js");
+      const sessionId = req.query.sessionId;
+      if (!sessionId) return res.status(400).json(failure("screenshot", "Missing sessionId"));
+
+      const session = browserService.getSession(sessionId);
+      if (!session) return res.status(404).json(failure("screenshot", "Session not found"));
+
+      const fullPage = ["true", "1", "yes", "y"].includes(String(req.query.fullPage || "").toLowerCase());
+      const buffer = await session.page.screenshot({ fullPage });
+
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Content-Length", buffer.length);
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.send(buffer);
+    } catch (error) {
+      res.status(500).json(failure("screenshot", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/screenshot/latest/:sessionId", async (req, res) => {
+    try {
+      const { browserService } = await import("./services/browserService.js");
+      const session = browserService.getSession(req.params.sessionId);
+      if (!session) return res.status(404).json(failure("screenshot", "Session not found"));
+
+      const latest = session.screenshotHistory[session.screenshotHistory.length - 1];
+      if (!latest || !latest.path) return res.status(404).json(failure("screenshot", "No screenshots taken yet"));
+
+      const { default: fs } = await import("node:fs/promises");
+      const buffer = await fs.readFile(latest.path);
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Content-Length", buffer.length);
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.send(buffer);
+    } catch (error) {
+      res.status(500).json(failure("screenshot", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/screenshots/:sessionId", async (req, res) => {
+    try {
+      const { browserService } = await import("./services/browserService.js");
+      const session = browserService.getSession(req.params.sessionId);
+      if (!session) return res.status(404).json(failure("screenshots", "Session not found"));
+
+      const port = config.port || 1000;
+      const screenshots = session.screenshotHistory.map((s, i) => ({
+        ...s,
+        index: i,
+        downloadUrl: s.path ? `http://127.0.0.1:${port}/screenshot/file/${req.params.sessionId}/${path.basename(s.path)}` : null
+      }));
+
+      res.json({
+        status: "success",
+        action: "screenshots",
+        data: { sessionId: req.params.sessionId, count: screenshots.length, screenshots },
+        error: ""
+      });
+    } catch (error) {
+      res.status(500).json(failure("screenshots", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/screenshot/file/:sessionId/:filename", async (req, res) => {
+    try {
+      const { browserService } = await import("./services/browserService.js");
+      const screenshotRoot = browserService.sessionScreenshotRoot(req.params.sessionId);
+      const safeName = req.params.filename.replace(/[^\w.\-() ]/g, "_");
+      const filePath = path.resolve(screenshotRoot, safeName);
+
+      // Path traversal guard
+      const rel = path.relative(screenshotRoot, filePath);
+      if (rel.startsWith("..") || path.isAbsolute(rel)) {
+        return res.status(403).json(failure("screenshot", "Forbidden"));
+      }
+
+      const { default: fs } = await import("node:fs/promises");
+      const buffer = await fs.readFile(filePath);
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Content-Length", buffer.length);
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.send(buffer);
+    } catch (error) {
+      res.status(404).json(failure("screenshot", "File not found"));
+    }
+  });
 
   app.get("/demo-form", (_req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -102,36 +229,36 @@ export function createApp() {
   });
 
   app.get("/", (_req, res) => {
+    const port = config.port || 1000;
+    const host = config.host || "127.0.0.1";
+    const baseUrl = `http://${host}:${port}`;
+
     res.json({
       status: "success",
       action: "root",
       data: {
-        name: "browser-automation-mcp-server",
+        name: "universal-browser-automation-server",
+        version: "3.1.0",
         health: "/health",
-        routes: [
-          "POST /open",
-          "POST /click",
-          "POST /type",
-          "POST /scroll",
-          "POST /hover",
-          "POST /wait",
-          "POST /select",
-          "POST /upload",
-          "POST /plan",
-          "POST /flow/:template",
-          "GET /agent/events",
-          "GET /agent/state",
-          "GET /screenshot",
-          "GET /analyze",
-          "GET /element_styles",
-          "GET /page_style_map",
-          "GET /auto_explore",
-          "GET /errors",
-          "GET /state",
-          "GET /sessions",
-          "DELETE /session/:sessionId",
-          "GET /health"
-        ]
+        integrations: {
+          mcp_sse: `${baseUrl}/mcp/sse`,
+          mcp_stdio: "node mcp-server.js",
+          rest_api: `${baseUrl}/api/tools`,
+          discovery: {
+            openai: `${baseUrl}/api/tools/definitions/openai`,
+            mcp: `${baseUrl}/api/tools/definitions/mcp`
+          }
+        },
+        setup_instructions: {
+          mcp_native: "Connect your MCP client to the SSE URL or run via Stdio.",
+          non_mcp_agent: `Copy the tool definitions from ${baseUrl}/api/tools/definitions/openai and paste them into your agent. Use ${baseUrl}/api/tools/:name as the endpoint.`
+        },
+        features: {
+          visionAI: "GEMINI_API_KEY " + (config.geminiApiKey ? "configured ✓" : "not set"),
+          scratchpad: config.scratchpadDir,
+          sessionReuse: config.sessionReuse,
+          interactionLock: config.interactionLock
+        }
       },
       error: ""
     });
@@ -146,15 +273,99 @@ export function createApp() {
     });
   });
 
-  // --- MCP SSE Integration ---
+  // --- Universal REST API Discovery ---
+  const zodToJsonSchema = (zodObj) => {
+    if (!zodObj) return { type: "object", properties: {} };
+    if (typeof zodObj === "object" && !(zodObj instanceof z.ZodType)) {
+      const properties = {};
+      const required = [];
+      for (const [key, field] of Object.entries(zodObj)) {
+        properties[key] = zodToJsonSchema(field);
+        if (!(field instanceof z.ZodOptional)) required.push(key);
+      }
+      return { type: "object", properties, required };
+    }
+    if (zodObj instanceof z.ZodObject) {
+      const properties = {};
+      const required = [];
+      for (const [key, field] of Object.entries(zodObj.shape)) {
+        properties[key] = zodToJsonSchema(field);
+        if (!(field instanceof z.ZodOptional)) required.push(key);
+      }
+      return { type: "object", properties, required };
+    }
+    if (zodObj instanceof z.ZodString) return { type: "string" };
+    if (zodObj instanceof z.ZodNumber) return { type: "number" };
+    if (zodObj instanceof z.ZodBoolean) return { type: "boolean" };
+    if (zodObj instanceof z.ZodOptional) return zodToJsonSchema(zodObj._def.innerType);
+    if (zodObj instanceof z.ZodEnum) return { type: "string", enum: zodObj._def.values };
+    if (zodObj instanceof z.ZodArray) return { type: "array", items: zodToJsonSchema(zodObj._def.type) };
+    if (zodObj instanceof z.ZodRecord) return { type: "object", additionalProperties: zodToJsonSchema(zodObj._def.valueType) };
+    return { type: "string" };
+  };
+
+  app.get("/api/tools/definitions/mcp", (req, res) => {
+    registerAllTools(); // Ensure registry is populated
+    res.json(success("discovery", toolsRegistry.map(t => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: zodToJsonSchema(t.schema)
+    }))));
+  });
+
+  app.get("/api/tools/definitions/openai", (req, res) => {
+    registerAllTools();
+    const tools = toolsRegistry.map(t => ({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: zodToJsonSchema(t.schema)
+      }
+    }));
+    res.json(tools);
+  });
+
+  // --- Dynamic Universal REST API Endpoints ---
+  app.post("/api/tools/:toolName", async (req, res) => {
+    try {
+      registerAllTools();
+      const { toolName } = req.params;
+      const tool = toolsRegistry.find(t => t.name === toolName);
+
+      if (!tool) {
+        return res.status(404).json(failure("toolExecution", `Tool not found: ${toolName}`));
+      }
+
+      console.log(`[REST] Executing tool: ${toolName}`);
+      const result = await tool.handler(req.body || {});
+      res.json(success(toolName, result));
+    } catch (error) {
+      console.error(`[REST ERROR] ${req.params.toolName}:`, error);
+      res.status(500).json(failure(req.params.toolName, error));
+    }
+  });
+
+  app.get("/api/tools", (req, res) => {
+    registerAllTools();
+    res.json(success("listTools", toolsRegistry.map(t => t.name)));
+  });
   let mcpTransports = [];
 
   app.get("/mcp/sse", async (req, res) => {
     try {
       console.log("[MCP] New SSE connection request");
+      
+      // Create a fresh server instance for this connection
+      const connectionServer = new McpServer(serverMetadata, {});
+      registerAllTools(connectionServer);
+
       const transport = new SSEServerTransport("/mcp/messages", res);
       mcpTransports.push(transport);
-      await mcpServer.connect(transport);
+      
+      console.log("[MCP] Connecting transport...");
+      await connectionServer.connect(transport);
+      console.log("[MCP] Transport connected successfully");
       
       // Cleanup when connection closes
       req.on("close", () => {
@@ -164,7 +375,8 @@ export function createApp() {
     } catch (error) {
       console.error("[MCP SSE ERROR]", error);
       if (!res.headersSent) {
-        res.status(500).json(failure("mcp", "Failed to connect MCP transport"));
+        // Send actual error message for debugging
+        res.status(500).json(failure("mcp", `Failed to connect MCP transport: ${error instanceof Error ? error.message : String(error)}`));
       }
     }
   });

@@ -2,11 +2,23 @@
 
 Read `MCP_TOOL_GUIDE.md` first. It is the canonical tool index and usage policy for this project.
 
+## Core Rules
 - Do not scan the whole repository just to discover tools.
 - Use real MCP tools for browser actions; do not simulate opening, clicking, typing, scrolling, uploading, or screenshots in text.
 - Use `browser_open` for URLs. `open_browser` is a compatibility alias for prompts that use that name.
 - Use `browser_analyze` or `browser_inspect` before acting when page state is unknown.
 - Use `browser_fill_form` for multiple fields instead of repeated `browser_type` calls.
 - Read implementation files only when editing or debugging the server itself.
+
+## Critical Calling Rules
 - **CRITICAL CALLING RULE**: If you are calling tools via a wrapper like `use_mcp_tool`, you MUST pass the tool arguments inside a `nativeArgs` object (e.g., `nativeArgs: { "url": "..." }`). Failing to do this will cause execution errors.
 - **CRITICAL RESOURCE RULE**: NEVER try to access executable tools as MCP resources by treating them as URIs (e.g. `mcp://browser-automation/browser_open` is INVALID). Tools like `browser_open` are executable actions, NOT read-only resources. Always call them as tools!
+
+## Autonomous Behavior Rules
+- **ALWAYS** call `browser_sessions` before `browser_open` to check if a session already exists for the target domain. NEVER create a new session if one exists.
+- **ALWAYS** use `browser_scratchpad_write` for any temporary files, test HTML, CSS experiments, or drafts. NEVER create test files in the user's project directory.
+- **ALWAYS** take a `browser_screenshot` after making any changes to visually verify the result.
+- **ALWAYS** use `browser_reconnect` instead of closing and recreating a session when a session becomes unresponsive.
+- **When cloning websites**: Follow the Autonomous Cloning Workflow in MCP_TOOL_GUIDE.md. Use `browser_deep_clone` first, then iteratively build in scratchpad and verify with `browser_vision_compare`.
+- **Self-verify**: After building something, compare it with the reference using `browser_vision_compare`. Fix differences until similarity > 95%.
+- **Think independently**: Use the scratchpad to plan and iterate. Minimize human involvement by making autonomous decisions about implementation.

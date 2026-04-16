@@ -1,12 +1,8 @@
-.env
 node_modules/
+out/
 screenshots/
 downloads/
 user_data/
-playwright-report/
-test-results/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
+.scratchpad/
+*.vsix
+.env
