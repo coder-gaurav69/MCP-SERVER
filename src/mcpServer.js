@@ -79,7 +79,10 @@ export const registerAllTools = (serverInstance) => {
         },
         async (params) => {
           try {
-            const data = await handler(params ?? {});
+            // Unwrap common client wrappers (e.g., Roo Code/Cliner often use nativeArgs or arguments)
+            const toolArgs = params?.nativeArgs || params?.arguments || params || {};
+            
+            const data = await handler(toolArgs);
             return { content: jsonText({ ok: true, data }) };
           } catch (error) {
             return {
@@ -136,7 +139,12 @@ export const registerAllTools = (serverInstance) => {
 
   tool(
     "browser_open",
-    `Open a URL in the browser (creates session if needed). IMPORTANT: Before calling this, check browser_sessions first — if a session already exists for the same website, it will be reused automatically. Set persist=true to keep cookies/logins across sessions.`,
+    `MANDATORY DEFAULT: Open a URL in the EXTERNAL headed browser for real-time user feedback. 
+Use this for EVERY URL-related task. The user wants to see the browser window move and act. 
+✨ AI BEST PRACTICE: 
+1. ALWAYS call browser_sessions first to check for existing sessions. 
+2. Set persist=true to keep cookies/logins. 
+3. If navigation fails, try increasing timeout with browser_wait before retrying.`,
     {
       sessionId: z.string().optional(),
       url: z.string(),
@@ -185,7 +193,12 @@ export const registerAllTools = (serverInstance) => {
 
   tool(
     "browser_click",
-    "Click an element by CSS selector or natural-language query. Use 'settlePolicy' to control post-click wait. The interaction lock is automatically applied.",
+    `Click an element by CSS selector or natural-language query. 
+✨ AI BEST PRACTICE: 
+1. Always call browser_analyze before this to find the most stable CSS selector. 
+2. If this is a 'Submit' button for a form, consider using 'browser_fill_form' to fill the form BEFORE clicking submit!
+3. If click has no visible effect, try browser_wait or use settlePolicy='strict'. 
+4. Verify the result with browser_screenshot.`,
     {
       sessionId: z.string().describe("Session ID from browser_open"),
       selector: z.string().optional().describe("CSS selector for exact target"),
@@ -197,7 +210,7 @@ export const registerAllTools = (serverInstance) => {
 
   tool(
     "browser_type",
-    "Type text into an input element. Automatic clearing of existing content is performed first. Interaction lock ensures no interference.",
+    "Type text into an input element. Automatic clearing of existing content is performed first.\n⚠️ AI BEST PRACTICE: If you are filling a form with multiple fields, DO NOT use browser_type repeatedly. Use 'browser_fill_form' instead to fill all fields in ONE fast operation.",
     {
       sessionId: z.string().describe("Session ID from browser_open"),
       selector: z.string().optional().describe("CSS selector for the input"),
@@ -300,7 +313,7 @@ export const registerAllTools = (serverInstance) => {
 
   tool(
     "browser_fill_form",
-    "Fill multiple form fields in ONE call. Pass fields as an object: { 'email field': 'test@example.com', 'password field': 'secret' }. This is MUCH faster than calling browser_type for each field.",
+    "HIGH PRIORITY: Fill multiple form fields in ONE call. Pass fields as a key-value object: { 'First Name field': 'John', 'Email address': 'john@example.com' }. This is HIGHLY RECOMMENDED over calling browser_type multiple times as it executes 5x faster.",
     {
       sessionId: z.string(),
       fields: z.record(z.string())
@@ -337,7 +350,9 @@ export const registerAllTools = (serverInstance) => {
 
   tool(
     "browser_analyze",
-    "Analyze current page DOM including interactive elements (buttons, links, forms). For <select> elements, it returns the first 15 available options. Use this before using 'browser_select' or 'browser_fill_form'.",
+    `Analyze current page DOM including interactive elements (buttons, links, forms). 
+✨ AI BEST PRACTICE: 
+Run this tool before ANY interaction (click, type, fill_form) to discover valid selectors and page structure. It returns the most reliable identifiers for other tools.`,
     { sessionId: z.string() },
     ({ sessionId }) => browserService.analyze({ sessionId })
   );
@@ -734,7 +749,7 @@ export const runServer = async () => {
 
   httpServer.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      console.error(`[WARNING] Port ${config.port} is already in use by another instance! Skipping HTTP Dashboard... but MCP Stdio will continue to work perfectly.`);
+      console.error(`[WARNING] Port ${config.port} is already in use by another instance! Skipping HTTP Dashboard... but MCP Stdio tools will continue to work perfectly. TIP: Change PORT in your .env file to run multiple dashboards.`);
     } else {
       console.error(`[ERROR] HTTP Server Error:`, err);
     }
@@ -771,6 +786,9 @@ const isMainModule = () => {
     return false;
   }
 };
+
+// Initialize tools on load so the registry is available for REST even before runServer is called
+registerAllTools();
 
 if (isMainModule()) {
   runServer().catch(console.error);

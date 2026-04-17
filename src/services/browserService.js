@@ -142,12 +142,19 @@ class BrowserService {
       return this.sessions.get(sessionId);
     }
 
-    // Smart session reuse: prefer existing session for same domain
-    if (!sessionId && options.url && config.sessionReuse) {
-      const existing = this.findSessionByDomain(options.url);
-      if (existing) {
-        this.appendScratchpad(existing, `♻ Reusing session ${existing.id} for ${options.url}`);
-        return existing;
+    // Smart session reuse: prefer existing session if any exists
+    if (!sessionId && config.sessionReuse) {
+      if (options.url) {
+        const domainMatch = this.findSessionByDomain(options.url);
+        if (domainMatch) {
+          this.appendScratchpad(domainMatch, `♻ Reusing domain match session ${domainMatch.id} for ${options.url}`);
+          return domainMatch;
+        }
+      }
+      if (this.sessions.size > 0) {
+        const lastSession = Array.from(this.sessions.values()).pop();
+        this.appendScratchpad(lastSession, `♻ Reusing last active session ${lastSession.id} for ${options.url || "task"}`);
+        return lastSession;
       }
     }
 
@@ -165,9 +172,7 @@ class BrowserService {
 
     // IMPORTANT (Windows): in headed mode, using `viewport: null` makes the viewport follow
     // the real OS window size, preventing "missing/cut off" UI due to responsive breakpoints.
-    // Playwright: launchPersistentContext rejects pairing `deviceScaleFactor` with `viewport: null`;
-    // use a fixed viewport for headed persistent sessions.
-    const viewport = headless ? { width, height } : persist ? { width, height } : null;
+    const viewport = headless ? { width, height } : null;
     const deviceScaleFactor = headless ? 1 : undefined;
 
     if (persist) {
@@ -190,6 +195,8 @@ class BrowserService {
       "--disable-default-apps",
       "--disable-extensions",
       "--no-default-browser-check",
+      "--force-device-scale-factor=1",
+      "--high-dpi-support=1",
       // In headed mode we avoid forcing scale; let OS scaling behave like a normal browser.
       ...(headless && Number.isFinite(scaleFactor) && scaleFactor > 0
         ? [`--force-device-scale-factor=${scaleFactor}`]
@@ -456,8 +463,27 @@ class BrowserService {
             @keyframes mcp-shake-small { 0%, 100% { transform: translateX(-50%); } 25% { transform: translateX(-52%); } 75% { transform: translateX(-48%); } }
             .mcp-shake-small { animation: mcp-shake-small 0.3s ease-in-out; }
             .mcp-pulse-active { border: 4px solid rgba(239, 68, 68, 0.5) !important; box-shadow: inset 0 0 50px rgba(239, 68, 68, 0.2); }
+            
+            #mcp-ghost-cursor {
+              position: fixed;
+              width: 12px;
+              height: 12px;
+              background: #ef4444;
+              border: 2px solid white;
+              border-radius: 50%;
+              pointer-events: none;
+              z-index: 2147483647;
+              transform: translate(-50%, -50%);
+              transition: transform 0.1s ease-out, opacity 0.3s ease-in-out;
+              box-shadow: 0 0 10px rgba(239, 68, 68, 0.8), 0 0 0 4px rgba(239, 68, 68, 0.2);
+              opacity: 0;
+            }
           `;
           document.head.appendChild(style);
+
+          const ghostCursor = document.createElement('div');
+          ghostCursor.id = '#mcp-ghost-cursor';
+          document.documentElement.appendChild(ghostCursor);
 
           const pulse = document.createElement('div');
           pulse.style.cssText = `width: 12px; height: 12px; background: #3b82f6; border-radius: 50%; animation: mcp-blink 1.5s infinite ease-in-out;`;
@@ -483,14 +509,25 @@ class BrowserService {
         window.__mcpUpdateAgentActive = (active) => {
           window.__mcpAgentActive = active;
           const overlay = document.getElementById('__mcpAgentOverlay');
+          const cursor = document.getElementById('#mcp-ghost-cursor');
           if (overlay) {
             if (active) {
               overlay.style.display = 'block';
+              if (cursor) cursor.style.opacity = '1';
               setTimeout(() => overlay.style.opacity = '1', 10);
             } else {
               overlay.style.opacity = '0';
+              if (cursor) cursor.style.opacity = '0';
               setTimeout(() => overlay.style.display = 'none', 300);
             }
+          }
+        };
+
+        window.__mcpUpdateGhostCursor = (x, y) => {
+          const cursor = document.getElementById('#mcp-ghost-cursor');
+          if (cursor) {
+            cursor.style.left = `${x}px`;
+            cursor.style.top = `${y}px`;
           }
         };
 
@@ -619,6 +656,14 @@ class BrowserService {
       const curX = getBezier(t, from.x, control.x, x);
       const curY = getBezier(t, from.y, control.y, y);
       await session.page.mouse.move(curX, curY);
+      
+      // Update visual ghost cursor
+      try {
+        await session.page.evaluate(({ x, y }) => {
+          if (window.__mcpUpdateGhostCursor) window.__mcpUpdateGhostCursor(x, y);
+        }, { x: curX, y: curY });
+      } catch { /* page navigated */ }
+
       if (i % 2 === 0) await new Promise(r => setTimeout(r, 5)); // Micro-jitter
     }
 
@@ -626,24 +671,73 @@ class BrowserService {
   }
 
   async waitForSettle(session, policy = "normal") {
-    const timeout = policy === "lazy" ? 100 : policy === "strict" ? 1500 : 500;
+    const timeout = policy === "lazy" ? 100 : policy === "strict" ? 2000 : 800;
     
-    if (config.turboMode && policy !== "strict") {
+    // Domain-specific cold start protection
+    const url = session.page.url();
+    const isSlowDomain = url.includes("onrender.com") || url.includes("vercel.app") || url.includes("render.com");
+    const effectiveTimeout = isSlowDomain ? Math.max(timeout, 3000) : timeout;
+
+    if (config.turboMode && policy !== "strict" && !isSlowDomain) {
       try {
-        // In Turbo Mode, we wait for networkidle but with a VERY short additional timeout
         await session.page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => { });
-        await new Promise(r => setTimeout(r, policy === "lazy" ? 20 : 50));
+        await new Promise(r => setTimeout(r, 50));
       } catch { /* ignore */ }
       return;
     }
 
     try {
-      await session.page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => { });
-      await new Promise(r => setTimeout(r, timeout));
+      await session.page.waitForLoadState("load", { timeout: 10000 }).catch(() => { });
+      await session.page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => { });
+      
+      // Stabilization: Wait for DOM mutations to stabilize
+      await session.page.waitForFunction(() => {
+        return new Promise((resolve) => {
+          let lastMutation = Date.now();
+          const observer = new MutationObserver(() => {
+            lastMutation = Date.now();
+          });
+          observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+          
+          const check = setInterval(() => {
+            if (Date.now() - lastMutation > 500) {
+              clearInterval(check);
+              observer.disconnect();
+              resolve(true);
+            }
+          }, 100);
+          
+          setTimeout(() => {
+            clearInterval(check);
+            observer.disconnect();
+            resolve(true);
+          }, 5000); // Max stabilization wait
+        });
+      }, { timeout: 6000 }).catch(() => {});
+
+      await new Promise(r => setTimeout(r, effectiveTimeout));
     } catch { /* ignore */ }
   }
 
   async setAgentActive(session, active) {
+    // If we're activating, do it immediately and cancel any pending deactivation
+    if (active) {
+      if (session._agentLockTimer) {
+        clearTimeout(session._agentLockTimer);
+        session._agentLockTimer = null;
+      }
+      await this._sendAgentActiveState(session, true);
+    } else {
+      // If we're deactivating, wait a bit to avoid flickering between rapid tool calls
+      if (session._agentLockTimer) clearTimeout(session._agentLockTimer);
+      session._agentLockTimer = setTimeout(async () => {
+        await this._sendAgentActiveState(session, false);
+        session._agentLockTimer = null;
+      }, 1200);
+    }
+  }
+
+  async _sendAgentActiveState(session, active) {
     session._agentActive = active;
     try {
       await session.page.evaluate((v) => {
@@ -772,7 +866,7 @@ class BrowserService {
              return { selector: `text=${query}`, strategy: "fallback-text" };
            } catch { /* ignore */ }
         }
-        throw new Error(`Unable to resolve selector for: "${query || selector}"`);
+        throw new Error(`Unable to resolve selector for: "${query || selector}". AI TIP: Try calling 'browser_analyze' first to see available interactive elements, or use 'browser_wait' if you think the page is still loading.`);
       }
     }
 
@@ -785,7 +879,7 @@ class BrowserService {
       } catch { /* ignore */ }
     }
 
-    throw new Error(`Unable to resolve selector for: "${query || selector}"`);
+    throw new Error(`Unable to resolve selector for: "${query || selector}". AI TIP: Try calling 'browser_analyze' first to see available interactive elements, or use 'browser_wait' if you think the page is still loading.`);
   }
 
   async captureScreenshot(session, label) {
@@ -866,9 +960,12 @@ class BrowserService {
     await this.setAgentActive(session, true);
     try {
       await session.page.goto(url, {
-        waitUntil: "domcontentloaded",
+        waitUntil: "load", // Changed from domcontentloaded for better initial reliability
         timeout: config.defaultTimeoutMs
       });
+      
+      // Wait for the page to stop shifting (Stabilize)
+      await this.waitForSettle(session, "strict");
       let title = await session.page.title();
       
       const isColdStartProxy = (t) => {

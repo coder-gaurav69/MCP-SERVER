@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Universal AI Browser Server | Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1 class="hero-title">Universal AI Browser Server</h1>
+      <p class="hero-subtitle">Premium browser automation for any AI agent. Connected via MCP & REST API.</p>
+    </header>
+
+    <div class="status-grid">
+      <div class="status-card">
+        <div class="status-header">
+          <span class="status-label">Server Status</span>
+          <span class="dot-online status-dot"></span>
+        </div>
+        <div class="status-value">Online</div>
+        <p class="muted" id="server-uptime">Running on port 1000</p>
+      </div>
+      <div class="status-card">
+        <div class="status-header">
+          <span class="status-label">Active Sessions</span>
+          <span id="sessions-count-dot" class="dot-online status-dot"></span>
+        </div>
+        <div class="status-value" id="sessions-count">0</div>
+        <p class="muted">Browser instances currently open</p>
+        <p class="muted" style="font-size: 0.75rem; color: #fbbf24; margin-top: 4px;">Tip: 0 sessions? You might be running 2 server instances. Connect IDE via SSE (http://localhost:1000/mcp/sse) to share sessions.</p>
+      </div>
+      <div class="status-card">
+        <div class="status-header">
+          <span class="status-label">Vision AI</span>
+          <span id="vision-dot" class="dot-online status-dot"></span>
+        </div>
+        <div class="status-value" id="vision-status">Enabled</div>
+        <p class="muted" id="vision-info">Powered by Gemini Flash</p>
+      </div>
+    </div>
+
+    <h2 class="section-title">Tools Explorer</h2>
+    <div id="tools-container" class="tools-grid">
+      <!-- Tools will be injected here -->
+      <div class="tool-card">
+        <p style="text-align: center; color: var(--text-secondary);">Loading tools...</p>
+      </div>
+    </div>
+
+    <h2 class="section-title">Live Agent Activity</h2>
+    <div id="live-feed" class="live-feed">
+      <div class="feed-line">
+        <span class="timestamp">[System]</span>
+        <span class="event-type">INFO</span>
+        Listening for agent activities via SSE...
+      </div>
+    </div>
+
+    <div style="margin-top: 60px; text-align: center;">
+      <h2 class="section-title" style="justify-content: center;">Agent Setup</h2>
+      <p class="muted" style="margin-bottom: 20px;">Use the prompt below to connect ANY external AI to this server.</p>
+      <button class="btn btn-primary" style="margin: 0 auto; padding: 12px 24px;" onclick="copySetupPrompt()">
+        Copy AI Connection Prompt
+      </button>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal-overlay" class="overlay">
+    <div class="modal">
+      <span class="close-modal" onclick="closeModal()">&times;</span>
+      <h3 id="modal-title" style="margin-bottom: 10px;">Tool Definition</h3>
+      <p id="modal-subtitle" class="muted" style="margin-bottom: 20px;">Copy this into your AI's tool/function list.</p>
+      <pre id="modal-code"></pre>
+      <div style="margin-top: 20px; display: flex; gap: 10px;">
+        <button class="btn btn-primary" onclick="copyModalCode()">Copy Strategy</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let tools = [];
+    
+    async function init() {
+      await fetchStatus();
+      await fetchTools();
+      setupSSE();
+      setInterval(fetchStatus, 5000);
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/tools/sessions');
+        const json = await res.json();
+        const count = json.data?.sessions?.length || 0;
+        document.getElementById('sessions-count').textContent = count;
+        document.getElementById('sessions-count-dot').className = count > 0 ? 'dot-online status-dot' : 'dot-offline status-dot';
+        
+        // Check root for Vision status
+        const rootRes = await fetch('/');
+        const rootJson = await rootRes.json();
+        const visionEnabled = rootJson.data.features.visionAI.includes('configured ✓');
+        document.getElementById('vision-status').textContent = visionEnabled ? 'Enabled' : 'Disabled';
+        document.getElementById('vision-dot').className = visionEnabled ? 'dot-online status-dot' : 'dot-offline status-dot';
+      } catch (e) {}
+    }
+
+    async function fetchTools() {
+      try {
+        const res = await fetch('/api/tools/definitions/openai');
+        tools = await res.json();
+        renderTools();
+      } catch (e) {
+        document.getElementById('tools-container').innerHTML = '<p class="error">Failed to load tools definitions.</p>';
+      }
+    }
+
+    function renderTools() {
+      const container = document.getElementById('tools-container');
+      container.innerHTML = tools.map((t, i) => `
+        <div class="tool-card">
+          <div class="tool-name">${t.function.name}</div>
+          <div class="tool-desc">${t.function.description}</div>
+          <div class="tool-actions">
+            <button class="btn btn-secondary" onclick="viewDefinition(${i})">AI Schema</button>
+            <button class="btn btn-primary" onclick="copyForAI(${i})">Copy for Agent</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function viewDefinition(index) {
+      const tool = tools[index];
+      document.getElementById('modal-title').textContent = tool.function.name;
+      document.getElementById('modal-code').textContent = JSON.stringify(tool, null, 2);
+      document.getElementById('modal-overlay').style.display = 'flex';
+    }
+
+    function copyForAI(index) {
+      const tool = tools[index];
+      navigator.clipboard.writeText(JSON.stringify(tool));
+      const btn = event.target;
+      const original = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = original, 2000);
+    }
+
+    function closeModal() {
+      document.getElementById('modal-overlay').style.display = 'none';
+    }
+
+    function copyModalCode() {
+      const code = document.getElementById('modal-code').textContent;
+      navigator.clipboard.writeText(code);
+      alert('Copied tool definition to clipboard!');
+    }
+
+    async function copySetupPrompt() {
+      const prompt = `I have a local Browser Automation Server at http://localhost:1000.
+It supports standard REST tools. Below is a 1-page summary of available tools.
+If you need a specific tool's full JSON schema, fetch it from http://localhost:1000/api/tools/{tool_name}/schema
+
+SUMMARY (llms.txt):
+I am a browser automation server. You can control a Chrome browser through me.
+Main Endpoints:
+- http://localhost:1000/api/tools/browser_open (url, sessionId?)
+- http://localhost:1000/api/tools/browser_click (selector, query, sessionId)
+- http://localhost:1000/api/tools/browser_type (selector, query, text, sessionId)
+- http://localhost:1000/api/tools/browser_fill_form (fields: object, sessionId)
+- http://localhost:1000/api/tools/browser_screenshot (sessionId, fullPage?)
+
+CRITICAL RULES:
+1. To start, call browser_sessions then browser_open. Use the returned sessionId everywhere.
+2. Form Filling: NEVER use browser_type repeatedly for multiple fields. ALWAYS use browser_fill_form to pass an object with all fields at once for 5x faster execution.`;
+      
+      navigator.clipboard.writeText(prompt);
+      alert('Bootstrap prompt copied! This is a much smaller prompt that tells the AI exactly how to fetch the rest of the tools.');
+    }
+
+    function setupSSE() {
+      const feed = document.getElementById('live-feed');
+      const source = new EventSource('/agent/events');
+      
+      source.addEventListener('agent.activity', (event) => {
+        const data = JSON.parse(event.data);
+        if (data.isAgentWorking) {
+          addFeedLine('ACTIVITY', data.currentAction, true);
+        }
+      });
+
+      source.addEventListener('agent.alert', (event) => {
+        const data = JSON.parse(event.data);
+        addFeedLine('ALERT', data.message);
+      });
+    }
+
+    function addFeedLine(type, message, isActive = false) {
+      const feed = document.getElementById('live-feed');
+      const time = new Date().toLocaleTimeString();
+      const line = document.createElement('div');
+      line.className = 'feed-line' + (isActive ? ' active' : '');
+      line.innerHTML = `<span class="timestamp">[${time}]</span><span class="event-type">${type}</span> ${message}`;
+      feed.prepend(line);
+      
+      // Keep only top 50
+      while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+    }
+
+    init();
+  </script>
+</body>
+</html>

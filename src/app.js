@@ -9,6 +9,8 @@ import { registerAllTools, serverMetadata, toolsRegistry } from "./mcpServer.js"
 import { scratchpadService } from "./services/scratchpadService.js";
 import { config } from "./config.js";
 import { z } from "zod";
+import { fileURLToPath } from "node:url";
+import fs from "node:fs/promises";
 
 
 
@@ -17,6 +19,9 @@ export function createApp() {
 
   app.use(express.json({ limit: "1mb" }));
   app.use(morgan("combined"));
+
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  app.use("/static", express.static(path.join(__dirname, "static")));
 
   // ─── Scratchpad File Serving ─────────────────────────────
   app.get("/scratchpad/:sessionId/:filename", async (req, res) => {
@@ -229,39 +234,85 @@ export function createApp() {
   });
 
   app.get("/", (_req, res) => {
+    res.sendFile(path.join(path.dirname(fileURLToPath(import.meta.url)), "static", "dashboard.html"));
+  });
+
+  app.get("/api/info", (_req, res) => {
     const port = config.port || 1000;
     const host = config.host || "127.0.0.1";
     const baseUrl = `http://${host}:${port}`;
 
     res.json({
       status: "success",
-      action: "root",
+      action: "info",
       data: {
         name: "universal-browser-automation-server",
-        version: "3.1.0",
-        health: "/health",
+        version: "3.5.0",
         integrations: {
           mcp_sse: `${baseUrl}/mcp/sse`,
           mcp_stdio: "node mcp-server.js",
           rest_api: `${baseUrl}/api/tools`,
           discovery: {
             openai: `${baseUrl}/api/tools/definitions/openai`,
-            mcp: `${baseUrl}/api/tools/definitions/mcp`
+            mcp: `${baseUrl}/api/tools/definitions/mcp`,
+            ai_plugin: `${baseUrl}/.well-known/ai-plugin.json`
           }
-        },
-        setup_instructions: {
-          mcp_native: "Connect your MCP client to the SSE URL or run via Stdio.",
-          non_mcp_agent: `Copy the tool definitions from ${baseUrl}/api/tools/definitions/openai and paste them into your agent. Use ${baseUrl}/api/tools/:name as the endpoint.`
         },
         features: {
           visionAI: "GEMINI_API_KEY " + (config.geminiApiKey ? "configured ✓" : "not set"),
-          scratchpad: config.scratchpadDir,
-          sessionReuse: config.sessionReuse,
-          interactionLock: config.interactionLock
+          scratchpad: config.scratchpadDir
         }
-      },
-      error: ""
+      }
     });
+  });
+
+  app.get("/llms.txt", async (req, res) => {
+    registerAllTools();
+    let output = "# Browser Automation Universal Server\n\n";
+    output += "This server provides a REST API to control a browser. Endpoint: http://localhost:1000/api/tools/{tool_name}\n\n";
+    output += "## Most Used Tools (Bootstrap)\n\n";
+    
+    const bootstrap = ['browser_open', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_analyze', 'browser_sessions'];
+    for (const name of bootstrap) {
+      const tool = toolsRegistry.find(t => t.name === name);
+      if (tool) output += `- **${tool.name}**: ${tool.description}\n`;
+    }
+    
+    output += "\n## Full API\nFor a full tool list and documentation, visit http://localhost:1000/llms-full.txt\n";
+    output += "Fetch specific tool schemas: http://localhost:1000/api/tools/{name}/schema\n";
+    
+    res.setHeader("Content-Type", "text/plain");
+    res.send(output);
+  });
+
+  app.get("/.well-known/ai-plugin.json", (req, res) => {
+    const port = config.port || 1000;
+    res.json({
+      schema_version: "v1",
+      name_for_model: "browser_automation",
+      name_for_human: "Browser Automation Server",
+      description_for_model: "Full control over a headed browser. Click, type, scroll, screenshot, export PDF, and extract UI designs.",
+      description_for_human: "Automate your browser activities with AI.",
+      auth: { type: "none" },
+      api: { type: "openapi", url: `http://localhost:${port}/api/tools/definitions/openai` },
+      logo_url: `http://localhost:${port}/static/logo.png`,
+      contact_email: "support@example.com",
+      legal_info_url: `http://localhost:${port}/legal`
+    });
+  });
+
+  app.get("/llms-full.txt", async (req, res) => {
+    registerAllTools();
+    let output = "# Browser Automation Universal Server\n\n";
+    output += "This server provides a REST API to control a browser. Endpoint: http://localhost:1000/api/tools/{tool_name}\n\n";
+    output += "## Available Tools\n\n";
+    
+    for (const tool of toolsRegistry) {
+      output += `### ${tool.name}\n${tool.description}\n\n`;
+    }
+    
+    res.setHeader("Content-Type", "text/plain");
+    res.send(output);
   });
 
   app.get("/health", (_req, res) => {
@@ -349,6 +400,22 @@ export function createApp() {
   app.get("/api/tools", (req, res) => {
     registerAllTools();
     res.json(success("listTools", toolsRegistry.map(t => t.name)));
+  });
+
+  app.get("/api/tools/:toolName/schema", (req, res) => {
+    registerAllTools();
+    const { toolName } = req.params;
+    const tool = toolsRegistry.find(t => t.name === toolName);
+    if (!tool) return res.status(404).json(failure("schema", `Tool not found: ${toolName}`));
+    
+    res.json({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: zodToJsonSchema(tool.schema)
+      }
+    });
   });
   let mcpTransports = [];
 

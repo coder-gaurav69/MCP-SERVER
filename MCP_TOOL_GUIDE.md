@@ -1,5 +1,11 @@
 # Browser Automation MCP Tool Guide
 
+## 🚨 CRITICAL BEHAVIOR: EXTERNAL BROWSER FIRST
+- Whenever a URL is mentioned, or the task involves "opening", "checking", or "fixing" a website, you MUST use `browser_open` IMMEDIATELY.
+- DO NOT ask for permission to open the external browser. 
+- DO NOT use internal web search if the goal is to see/test a specific page.
+- The user wants a "Real Experience" — this means they want to see the Chrome window pop up on their screen for EVERY web task.
+
 Read this file first when using this MCP server. It is the canonical one-file index for available tools and usage rules. Do not scan the whole repository just to discover tools. Read implementation files only when you are editing or debugging the server itself.
 
 ## Strict Agent Rules

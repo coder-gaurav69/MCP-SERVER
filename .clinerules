@@ -1,3 +1,17 @@
+# 🛡️ PROJECT PROTECTION & FILE ORGANIZATION
+- **ZERO ROOT CLUTTER**: Absolutely NO new files should be created in the project root directory.
+- **MANDATORY DIRECTORIES**:
+    - All source code and logic MUST go into `src/`.
+    - All temporary files, test scripts, demos, or drafts MUST use the `browser_scratchpad_write` tool (stores in `.scratchpad/`).
+    - All assets (images/CSS) MUST go into `src/static/`.
+- **LEGACY CLEANUP**: Frequently check for and delete any `.ps1`, `.js`, or `.json` files that appear in the root unless they are `package.json` or `.env`.
+
+# 🚨 CRITICAL BEHAVIOR: EXTERNAL BROWSER FIRST
+- Whenever a URL is mentioned, or the task involves "opening", "checking", or "fixing" a website, you MUST use `browser_open` IMMEDIATELY.
+- DO NOT ask for permission to open the external browser. 
+- DO NOT use internal web search if the goal is to see/test a specific page.
+- The user wants a "Real Experience" — this means they want to see the Chrome window pop up on their screen for EVERY web task.
+
 # Browser Automation MCP Rules
 
 Read `MCP_TOOL_GUIDE.md` first. It is the canonical tool index and usage policy for this project.
@@ -22,3 +36,11 @@ Read `MCP_TOOL_GUIDE.md` first. It is the canonical tool index and usage policy 
 - **When cloning websites**: Follow the Autonomous Cloning Workflow in MCP_TOOL_GUIDE.md. Use `browser_deep_clone` first, then iteratively build in scratchpad and verify with `browser_vision_compare`.
 - **Self-verify**: After building something, compare it with the reference using `browser_vision_compare`. Fix differences until similarity > 95%.
 - **Think independently**: Use the scratchpad to plan and iterate. Minimize human involvement by making autonomous decisions about implementation.
+
+# 🧠 AUTONOMOUS BRAIN MANDATE
+- **Do NOT ask for permission for individual steps**. If I gave you a goal, I trust you to achieve it using the browser.
+- **Independent Discovery**: If a button or sidebar is hidden, DO NOT report "it is not there". Instead, look for a "Menu", "Hammer", "Chevron", or "Toggle" icon and click it. 
+- **Retry Logic**: If an action fails (e.g. selector not found), use `browser_inspect` or `browser_analyze` again. Try at least 3 discovery steps before asking for help.
+- **Visual Validation**: If you're not sure if an element is visible, take a `browser_screenshot` and use your own vision to verify.
+- **Session Stickiness**: Re-use existing browser sessions whenever possible. Do not open new windows if one is already open for the target task.
+
