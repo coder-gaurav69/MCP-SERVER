@@ -4,6 +4,7 @@ import { chromium } from "playwright";
 import { v4 as uuidv4 } from "uuid";
 import { config } from "../config.js";
 import { agentActivityService } from "./agentActivityService.js";
+import { visionService } from "./visionService.js";
 
 /** Kebab-case names for `getComputedStyle(...).getPropertyValue(...)` (clone / codegen helpers). */
 const COMPUTED_STYLE_PROPERTY_KEYS = [
@@ -414,134 +415,261 @@ class BrowserService {
         window.__mcpAgentActive = isStickyActive();
 
         const setupUI = () => {
-          // Only create overlay in the main frame, but block events in all frames
           const isMainFrame = window.self === window.top;
           if (!isMainFrame) return;
-
           if (document.getElementById('__mcpAgentOverlay')) return;
 
-          const overlay = document.createElement('div');
-          overlay.id = '__mcpAgentOverlay';
-          overlay.style.cssText = `
-            position: fixed;
-            top: 0; left: 0; width: 100vw; height: 100vh;
-            z-index: 2147483645;
-            display: ${window.__mcpAgentActive ? 'block' : 'none'};
-            pointer-events: all;
-            cursor: not-allowed;
-            transition: opacity 0.4s ease;
-            opacity: ${window.__mcpAgentActive ? '1' : '0'};
-            user-select: none;
-          `;
-
-          const vignette = document.createElement('div');
-          vignette.style.cssText = `
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: radial-gradient(ellipse at center, transparent 40%, rgba(99, 102, 241, 0.1) 100%);
-            backdrop-filter: blur(6px);
-            -webkit-backdrop-filter: blur(6px);
-            mask-image: radial-gradient(ellipse at center, transparent 60%, black 100%);
-            -webkit-mask-image: radial-gradient(ellipse at center, transparent 60%, black 100%);
-            box-shadow: inset 0 0 120px rgba(99, 102, 241, 0.25);
-            pointer-events: none;
-            z-index: 1;
-          `;
-          overlay.appendChild(vignette);
-
-          const pulseBorder = document.createElement('div');
-          pulseBorder.id = '__mcpAgentPulseBorder';
-          pulseBorder.style.cssText = `
-            position: fixed;
-            top: 0; left: 0; width: 100vw; height: 100vh;
-            border: 4px solid transparent;
-            box-sizing: border-box;
-            pointer-events: none;
-            z-index: 2147483646;
-            transition: border-color 0.3s ease, transform 0.2s ease;
-          `;
-
-          const controlCenter = document.createElement('div');
-          controlCenter.style.cssText = `
-            position: fixed;
-            bottom: 40px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(15, 20, 30, 0.85);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: #ffffff;
-            padding: 16px 32px;
-            border-radius: 24px;
-            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            max-width: 90vw;
-            z-index: 2;
-          `;
-
+          /* ── Stylesheet ─────────────────────────────────────────── */
           const style = document.createElement('style');
           style.textContent = `
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-            @keyframes mcp-glow-pulse {
-              0%, 100% { box-shadow: 0 0 20px rgba(99, 102, 241, 0.4); opacity: 0.8; }
-              50% { box-shadow: 0 0 40px rgba(99, 102, 241, 0.8); opacity: 1; }
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+            /* ── Animated gradient border ── */
+            @keyframes mcp-border-flow {
+              0%   { background-position: 0% 50%; }
+              50%  { background-position: 100% 50%; }
+              100% { background-position: 0% 50%; }
             }
-            @keyframes mcp-border-pulse {
-              0%, 100% { border-color: rgba(239, 68, 68, 0); transform: scale(1); }
-              50% { border-color: rgba(239, 68, 68, 0.8); transform: scale(0.998); }
+
+            /* ── Scanning line ── */
+            @keyframes mcp-scan-line {
+              0%   { top: -2px; opacity: 0; }
+              10%  { opacity: 1; }
+              90%  { opacity: 1; }
+              100% { top: 100%; opacity: 0; }
             }
+
+            /* ── Pill slide-up entrance ── */
+            @keyframes mcp-pill-enter {
+              0%   { opacity: 0; transform: translateX(-50%) translateY(30px) scale(0.96); }
+              100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+            }
+
+            /* ── Breathing glow for status dot ── */
+            @keyframes mcp-breathe {
+              0%, 100% { box-shadow: 0 0 6px 2px rgba(99,102,241,0.5), 0 0 18px 4px rgba(99,102,241,0.25); transform: scale(1); }
+              50%      { box-shadow: 0 0 10px 4px rgba(139,92,246,0.7), 0 0 30px 8px rgba(139,92,246,0.35); transform: scale(1.15); }
+            }
+
+            /* ── Typing dots ── */
+            @keyframes mcp-dot-bounce {
+              0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+              40%            { opacity: 1;   transform: translateY(-4px); }
+            }
+
+            /* ── Shake on blocked interaction ── */
             @keyframes mcp-shake-small {
               0%, 100% { transform: translateX(-50%); }
-              25% { transform: translateX(calc(-50% - 4px)); }
-              75% { transform: translateX(calc(-50% + 4px)); }
+              20%      { transform: translateX(calc(-50% - 5px)); }
+              40%      { transform: translateX(calc(-50% + 5px)); }
+              60%      { transform: translateX(calc(-50% - 3px)); }
+              80%      { transform: translateX(calc(-50% + 3px)); }
             }
-            .mcp-shake-small { animation: mcp-shake-small 0.3s cubic-bezier(.36,.07,.19,.97) both; }
-            .mcp-pulse-active { animation: mcp-border-pulse 0.5s ease-in-out; }
-            
+            .mcp-shake-small { animation: mcp-shake-small 0.35s cubic-bezier(.36,.07,.19,.97) both; }
+
+            /* ── Red flash on blocked interaction ── */
+            @keyframes mcp-border-pulse {
+              0%, 100% { border-color: rgba(239, 68, 68, 0); }
+              50%      { border-color: rgba(239, 68, 68, 0.7); }
+            }
+            .mcp-pulse-active { animation: mcp-border-pulse 0.45s ease-in-out; }
+
+            /* ── Ghost cursor ── */
             #mcp-ghost-cursor {
               position: fixed;
-              width: 14px;
-              height: 14px;
-              background: linear-gradient(135deg, #6366f1, #a855f7);
-              border: 2px solid white;
+              width: 16px; height: 16px;
+              background: linear-gradient(135deg, #818cf8, #a78bfa);
+              border: 2px solid rgba(255,255,255,0.9);
               border-radius: 50%;
               pointer-events: none;
               z-index: 2147483647;
               transform: translate(-50%, -50%);
-              transition: transform 0.15s cubic-bezier(0.2, 0, 0, 1), opacity 0.3s ease;
-              box-shadow: 0 4px 12px rgba(99, 102, 241, 0.5), 0 0 0 4px rgba(99, 102, 241, 0.2);
+              transition: left 0.12s cubic-bezier(0.2,0,0,1), top 0.12s cubic-bezier(0.2,0,0,1), opacity 0.3s ease;
+              box-shadow: 0 2px 10px rgba(99,102,241,0.6), 0 0 0 5px rgba(99,102,241,0.15);
               opacity: 0;
             }
           `;
           document.head.appendChild(style);
 
+          /* ── Overlay (root container — blocks interaction) ─────── */
+          const overlay = document.createElement('div');
+          overlay.id = '__mcpAgentOverlay';
+          overlay.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            z-index: 2147483645;
+            display: ${window.__mcpAgentActive ? 'block' : 'none'};
+            pointer-events: all; cursor: not-allowed;
+            transition: opacity 0.45s cubic-bezier(0.4,0,0.2,1);
+            opacity: ${window.__mcpAgentActive ? '1' : '0'};
+            user-select: none;
+          `;
+
+          /* ── Subtle vignette (edge-only blur + tint) ── */
+          const vignette = document.createElement('div');
+          vignette.style.cssText = `
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(ellipse at center, transparent 50%, rgba(30,27,75,0.08) 100%);
+            backdrop-filter: blur(3px);
+            -webkit-backdrop-filter: blur(3px);
+            mask-image: radial-gradient(ellipse at center, transparent 65%, black 100%);
+            -webkit-mask-image: radial-gradient(ellipse at center, transparent 65%, black 100%);
+            pointer-events: none; z-index: 1;
+          `;
+          overlay.appendChild(vignette);
+
+          /* ── Animated gradient border frame ── */
+          const borderFrame = document.createElement('div');
+          borderFrame.style.cssText = `
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none; z-index: 2;
+          `;
+          // Four edge strips that form a glowing animated border
+          const edges = [
+            { css: 'top:0;left:0;width:100%;height:3px;' },
+            { css: 'bottom:0;left:0;width:100%;height:3px;' },
+            { css: 'top:0;left:0;width:3px;height:100%;' },
+            { css: 'top:0;right:0;width:3px;height:100%;' }
+          ];
+          edges.forEach(e => {
+            const strip = document.createElement('div');
+            strip.style.cssText = `
+              position:absolute; ${e.css}
+              background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa, #6366f1, #8b5cf6);
+              background-size: 300% 300%;
+              animation: mcp-border-flow 4s linear infinite;
+              opacity: 0.7;
+              border-radius: 2px;
+            `;
+            borderFrame.appendChild(strip);
+          });
+          overlay.appendChild(borderFrame);
+
+          /* ── Corner glow accents ── */
+          const corners = [
+            'top:0;left:0;background:radial-gradient(circle at 0% 0%,rgba(99,102,241,0.25) 0%,transparent 60%);',
+            'top:0;right:0;background:radial-gradient(circle at 100% 0%,rgba(139,92,246,0.2) 0%,transparent 60%);',
+            'bottom:0;left:0;background:radial-gradient(circle at 0% 100%,rgba(139,92,246,0.2) 0%,transparent 60%);',
+            'bottom:0;right:0;background:radial-gradient(circle at 100% 100%,rgba(99,102,241,0.25) 0%,transparent 60%);'
+          ];
+          corners.forEach(c => {
+            const glow = document.createElement('div');
+            glow.style.cssText = `position:absolute;width:180px;height:180px;pointer-events:none;z-index:3;${c}`;
+            overlay.appendChild(glow);
+          });
+
+          /* ── Scanning line ── */
+          const scanLine = document.createElement('div');
+          scanLine.style.cssText = `
+            position: absolute; left: 0; width: 100%; height: 2px;
+            background: linear-gradient(90deg, transparent 0%, rgba(129,140,248,0.5) 30%, rgba(167,139,250,0.7) 50%, rgba(129,140,248,0.5) 70%, transparent 100%);
+            box-shadow: 0 0 15px 3px rgba(129,140,248,0.3);
+            pointer-events: none; z-index: 4;
+            animation: mcp-scan-line 4s ease-in-out infinite;
+          `;
+          overlay.appendChild(scanLine);
+
+          /* ── Premium Control-Center Pill ── */
+          const pill = document.createElement('div');
+          pill.id = '__mcpAgentPill';
+          pill.style.cssText = `
+            position: fixed; bottom: 32px; left: 50%;
+            transform: translateX(-50%);
+            background: linear-gradient(135deg, rgba(15,15,35,0.92) 0%, rgba(30,27,75,0.88) 100%);
+            backdrop-filter: blur(24px) saturate(1.8);
+            -webkit-backdrop-filter: blur(24px) saturate(1.8);
+            border: 1px solid rgba(129,140,248,0.2);
+            color: #fff;
+            padding: 14px 28px 14px 22px;
+            border-radius: 100px;
+            box-shadow:
+              0 0 0 1px rgba(129,140,248,0.08),
+              0 8px 32px rgba(0,0,0,0.45),
+              0 2px 8px rgba(99,102,241,0.15),
+              inset 0 1px 0 rgba(255,255,255,0.06);
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            display: flex; align-items: center; gap: 14px;
+            z-index: 5;
+            animation: mcp-pill-enter 0.5s cubic-bezier(0.16,1,0.3,1) both;
+            transition: box-shadow 0.3s ease, border-color 0.3s ease;
+          `;
+
+          // Inner glow line on top of pill
+          const pillGlow = document.createElement('div');
+          pillGlow.style.cssText = `
+            position: absolute; top: 0; left: 20%; right: 20%; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(167,139,250,0.5), transparent);
+            border-radius: 1px;
+          `;
+          pill.appendChild(pillGlow);
+
+          // Status dot with breathing animation
+          const statusDot = document.createElement('div');
+          statusDot.style.cssText = `
+            width: 10px; height: 10px;
+            background: linear-gradient(135deg, #818cf8, #a78bfa);
+            border-radius: 50%;
+            animation: mcp-breathe 2.5s ease-in-out infinite;
+            flex-shrink: 0;
+          `;
+          pill.appendChild(statusDot);
+
+          // Separator
+          const sep = document.createElement('div');
+          sep.style.cssText = `width:1px;height:24px;background:rgba(255,255,255,0.08);flex-shrink:0;`;
+          pill.appendChild(sep);
+
+          // Agent icon (SVG sparkle)
+          const iconWrap = document.createElement('div');
+          iconWrap.style.cssText = `display:flex;align-items:center;flex-shrink:0;`;
+          iconWrap.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="url(#ag-grad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><defs><linearGradient id="ag-grad" x1="0" y1="0" x2="24" y2="24"><stop offset="0%" stop-color="#818cf8"/><stop offset="100%" stop-color="#c084fc"/></linearGradient></defs><path d="M12 2l2.09 6.26L20.18 10l-6.09 1.74L12 18l-2.09-6.26L3.82 10l6.09-1.74L12 2z"/><path d="M19 15l1.04 3.13L23.18 19l-3.14.87L19 23l-1.04-3.13L14.82 19l3.14-.87L19 15z" opacity="0.6"/></svg>';
+          pill.appendChild(iconWrap);
+
+          // Text content
+          const textWrap = document.createElement('div');
+          textWrap.style.cssText = `display:flex;flex-direction:column;gap:2px;`;
+          const titleEl = document.createElement('span');
+          titleEl.style.cssText = `font-size:14px;font-weight:600;letter-spacing:-0.02em;color:#e0e7ff;line-height:1.2;`;
+          titleEl.textContent = 'Antigravity Agent Active';
+          const subEl = document.createElement('span');
+          subEl.style.cssText = `font-size:11.5px;font-weight:400;color:#94a3b8;letter-spacing:0.01em;line-height:1.3;`;
+          subEl.textContent = 'Interaction paused while agent is working';
+          textWrap.appendChild(titleEl);
+          textWrap.appendChild(subEl);
+          pill.appendChild(textWrap);
+
+          // Animated typing dots
+          const dotsWrap = document.createElement('div');
+          dotsWrap.style.cssText = `display:flex;gap:4px;align-items:center;margin-left:4px;`;
+          for (let i = 0; i < 3; i++) {
+            const dot = document.createElement('div');
+            dot.style.cssText = `
+              width:5px;height:5px;border-radius:50%;
+              background:#818cf8;
+              animation: mcp-dot-bounce 1.4s ease-in-out infinite;
+              animation-delay: ${i * 0.2}s;
+            `;
+            dotsWrap.appendChild(dot);
+          }
+          pill.appendChild(dotsWrap);
+          overlay.appendChild(pill);
+
+          /* ── Pulse border (for blocked-interaction flash) ─────── */
+          const pulseBorder = document.createElement('div');
+          pulseBorder.id = '__mcpAgentPulseBorder';
+          pulseBorder.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            border: 3px solid transparent; box-sizing: border-box;
+            pointer-events: none; z-index: 2147483646;
+            transition: border-color 0.3s ease;
+            border-radius: 2px;
+          `;
+
+          /* ── Ghost cursor ── */
           const ghostCursor = document.createElement('div');
-          ghostCursor.id = '#mcp-ghost-cursor';
+          ghostCursor.id = 'mcp-ghost-cursor';
           document.documentElement.appendChild(ghostCursor);
 
-          const pulse = document.createElement('div');
-          pulse.style.cssText = `width: 16px; height: 16px; background: #6366f1; border-radius: 50%; animation: mcp-glow-pulse 2s infinite ease-in-out;`;
-
-          const textWrapper = document.createElement('div');
-          textWrapper.style.cssText = `display: flex; flex-direction: column; gap: 4px;`;
-          const title = document.createElement('span');
-          title.style.cssText = `font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: #ffffff;`;
-          title.textContent = 'Antigravity Agent is Working ✨';
-          const subtitle = document.createElement('span');
-          subtitle.style.cssText = `font-size: 13px; font-weight: 400; color: #94a3b8; letter-spacing: 0.01em;`;
-          subtitle.textContent = 'User interaction temporarily disabled to ensure stability.';
-
-
-          textWrapper.appendChild(title);
-          textWrapper.appendChild(subtitle);
-          controlCenter.appendChild(pulse);
-          controlCenter.appendChild(textWrapper);
-          overlay.appendChild(controlCenter);
+          /* ── Mount ── */
           document.documentElement.appendChild(overlay);
           document.documentElement.appendChild(pulseBorder);
         };
@@ -549,7 +677,7 @@ class BrowserService {
         window.__mcpUpdateAgentActive = (active) => {
           window.__mcpAgentActive = active;
           const overlay = document.getElementById('__mcpAgentOverlay');
-          const cursor = document.getElementById('#mcp-ghost-cursor');
+          const cursor = document.getElementById('mcp-ghost-cursor');
           if (overlay) {
             if (active) {
               overlay.style.display = 'block';
@@ -564,7 +692,7 @@ class BrowserService {
         };
 
         window.__mcpUpdateGhostCursor = (x, y) => {
-          const cursor = document.getElementById('#mcp-ghost-cursor');
+          const cursor = document.getElementById('mcp-ghost-cursor');
           if (cursor) {
             cursor.style.left = `${x}px`;
             cursor.style.top = `${y}px`;
@@ -583,14 +711,13 @@ class BrowserService {
             e.stopImmediatePropagation();
             
             // Visual feedback
-            const overlay = document.getElementById('__mcpAgentOverlay');
             const border = document.getElementById('__mcpAgentPulseBorder');
-            const controlCenter = overlay?.querySelector('div');
+            const pill = document.getElementById('__mcpAgentPill');
             
-            if (controlCenter) {
-              controlCenter.classList.remove('mcp-shake-small');
-              void controlCenter.offsetWidth;
-              controlCenter.classList.add('mcp-shake-small');
+            if (pill) {
+              pill.classList.remove('mcp-shake-small');
+              void pill.offsetWidth;
+              pill.classList.add('mcp-shake-small');
             }
             if (border) {
               border.classList.add('mcp-pulse-active');
@@ -1217,7 +1344,7 @@ class BrowserService {
     };
   }
 
-  async screenshot({ sessionId, fileName, fullPage = false, embedImage = true, saveLocal = false }) {
+  async screenshot({ sessionId, fileName, fullPage = false, embedImage = true, saveLocal = false, analyze = false, prompt = "" }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
 
@@ -1261,6 +1388,21 @@ class BrowserService {
     if (embedImage) {
       result.imageBase64 = buffer.toString("base64");
     }
+
+    if (analyze && visionService.isAvailable()) {
+      try {
+        const visionResult = await visionService.analyzeScreenshot(buffer, prompt);
+        result.analysis = visionResult.analysis;
+        result.visionAvailable = true;
+      } catch (error) {
+        result.analysis = `Vision analysis failed: ${error instanceof Error ? error.message : String(error)}`;
+        result.visionAvailable = false;
+      }
+    } else if (analyze) {
+      result.analysis = "Vision analysis requested but Vision AI is disabled (check GEMINI_API_KEY).";
+      result.visionAvailable = false;
+    }
+
     return result;
   }
 

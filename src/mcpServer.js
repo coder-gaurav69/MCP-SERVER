@@ -485,17 +485,28 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
         .boolean()
         .optional()
         .default(false)
-        .describe("When true, also saves the screenshot to the server's local disk. Default is false to keep your drive clean.")
+        .describe("When true, also saves the screenshot to the server's local disk. Default is false to keep your drive clean."),
+      analyze: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("When true, uses Vision AI (Gemini Flash 2) to provide a text description of the screenshot."),
+      prompt: z
+        .string()
+        .optional()
+        .describe("Custom prompt for Vision AI analysis (e.g., 'Check if the login form is visible')")
     });
 
     const screenshotHandler = async (args) => {
-      const { sessionId, fileName, fullPage, embedImage, saveLocal } = args ?? {};
+      const { sessionId, fileName, fullPage, embedImage, saveLocal, analyze, prompt } = args ?? {};
       const data = await browserService.screenshot({
         sessionId,
         fileName,
         fullPage,
         embedImage: embedImage !== undefined ? !!embedImage : true,
-        saveLocal: !!saveLocal
+        saveLocal: !!saveLocal,
+        analyze: !!analyze,
+        prompt
       });
       return data;
     };
@@ -515,7 +526,7 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
       serverInstance.registerTool(
         "browser_screenshot",
         {
-          description: "Take a screenshot. By default, it returns the image directly to your chat (embedImage=true) and DOES NOT save it to disk (saveLocal=false). ALWAYS take a screenshot after making changes to verify them visually.",
+          description: "Take a screenshot. By default, it returns the image directly to your chat (embedImage=true). Set analyze=true to also get an AI-driven visual description of the page state.",
           inputSchema: screenshotSchema
         },
         async (args) => {
