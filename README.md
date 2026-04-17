@@ -1,13 +1,18 @@
 # Browser Automation MCP Server
 
-Production-ready Node.js + Express + Playwright server for browser automation.
+Production-ready Node.js + Playwright MCP server for AI-driven browser automation.
 
 > [!TIP]
-> **AI AGENTS (Cursor, Copilot, Roo Code, Antigravity, etc.)**: Read [MCP_TOOL_GUIDE.md](./MCP_TOOL_GUIDE.md) first. It is the canonical one-file tool index and usage policy, also exposed at `mcp://browser-automation/tool-guide` and through `browser_tool_guide`. Do not scan the whole repo just to discover tools; use the provided MCP tools directly.
+> **AI Agents (Cursor, Copilot, Roo Code, Antigravity)**: Read [MCP_TOOL_GUIDE.md](./MCP_TOOL_GUIDE.md) for the full tool catalog. Use native MCP tool calls — **never** use `curl` or terminal HTTP.
+
+> [!IMPORTANT]
+> **Non-MCP AI (ChatGPT, Claude web, etc.)**: See [PROMPT_FOR_ANY_AI.md](./PROMPT_FOR_ANY_AI.md) for copy-paste REST API instructions.
+
+---
 
 ## Requirements
 
-- Node.js 18.18+ (or newer)
+- Node.js 18.18+
 - npm
 
 ## Install
@@ -19,163 +24,146 @@ npm install
 ## Run
 
 ```bash
-npm start
+# MCP STDIO mode (for AI agents — Cursor, Roo Code, etc.)
+node mcp-server.js
+
+# Or via npm
+npm run mcp
 ```
 
-Server starts on `http://localhost:1000` by default.
+The server starts in **dual mode**:
+- **STDIO**: JSON-RPC over stdin/stdout for MCP clients
+- **HTTP Dashboard**: `http://localhost:1000` for monitoring & REST API
 
 ## Environment Variables
 
-- `PORT` (default: `1000`)
-- `HEADLESS` (default: `true`)
-- `DEFAULT_TIMEOUT_MS` (default: `10000`)
-- `MAX_RETRIES` (default: `3`)
-- `SCREENSHOT_DIR` (default: `screenshots`)
+Copy `.env.example` to `.env` and configure:
 
-Example:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `1000` | Dashboard & REST API port |
+| `HEADLESS` | `false` | Run browser in headless mode |
+| `DEFAULT_TIMEOUT_MS` | `10000` | Default timeout for actions |
+| `MAX_RETRIES` | `3` | Max retries for failed actions |
+| `SCREENSHOT_DIR` | `.mcp_data/screenshots` | Screenshot storage |
+| `BROWSER_CHANNEL` | *(empty)* | Use system Chrome: `chrome` or `msedge` |
+| `STEALTH_MODE` | `true` | Anti-detection measures |
+| `TURBO_MODE` | `false` | Skip animations for speed |
+| `INTERACTION_LOCK` | `true` | Block manual clicks during automation |
+| `SESSION_REUSE` | `true` | Reuse sessions for same domain |
+| `GEMINI_API_KEY` | *(empty)* | Free Vision AI — get at [aistudio.google.com](https://aistudio.google.com) |
+| `FIGMA_API_TOKEN` | *(empty)* | Figma integration |
+| `SCRATCHPAD_DIR` | `.mcp_data/scratchpad` | Isolated temp file directory |
 
-```bash
-set HEADLESS=false && npm start
-```
+---
 
-## Response Format
+## For Developers
 
-All endpoints return:
+### Response Format
 
+All REST endpoints return:
 ```json
 {
   "status": "success | error",
-  "action": "",
+  "action": "toolName",
   "data": {},
   "error": ""
 }
 ```
 
-## Quick API Test Flow
-
-### 1) Health check
+### Quick REST API Test
 
 ```bash
+# Health check
 curl http://localhost:1000/health
+
+# Open a URL
+curl -X POST http://localhost:1000/api/bridge/call -H "Content-Type: application/json" -d "{\"tool\": \"browser_open\", \"arguments\": {\"url\": \"https://example.com\"}}"
+
+# List sessions
+curl http://localhost:1000/api/bridge/call -X POST -H "Content-Type: application/json" -d "{\"tool\": \"browser_sessions\", \"arguments\": {}}"
 ```
 
-### 2) Open a URL
+### API Discovery
 
-```bash
-curl -X POST http://localhost:1000/open ^
-  -H "Content-Type: application/json" ^
-  -d "{\"url\":\"https://example.com\",\"headless\":true}"
-```
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/tools` | List all tool names |
+| `GET /api/tools/:name/schema` | Get tool schema (OpenAI format) |
+| `GET /api/tools/definitions/openai` | All tools in OpenAI function format |
+| `GET /api/tools/definitions/mcp` | All tools in MCP format |
+| `POST /api/bridge/call` | Execute any tool via REST |
+| `GET /mcp/sse` | MCP over SSE transport |
 
-Response includes `data.sessionId`. Save it for next calls.
+### REST Endpoints (Legacy)
 
-### 3) Analyze page DOM
-
-```bash
-curl "http://localhost:1000/analyze?sessionId=YOUR_SESSION_ID"
-```
-
-### 4) Click an element
-
-```bash
-curl -X POST http://localhost:1000/click ^
-  -H "Content-Type: application/json" ^
-  -d "{\"sessionId\":\"YOUR_SESSION_ID\",\"selector\":\"a[href='https://www.iana.org/domains/example']\"}"
-```
-
-### 5) Type into an input
-
-```bash
-curl -X POST http://localhost:1000/type ^
-  -H "Content-Type: application/json" ^
-  -d "{\"sessionId\":\"YOUR_SESSION_ID\",\"selector\":\"input[name='q']\",\"text\":\"playwright automation\"}"
-```
-
-### 6) Scroll page
-
-```bash
-curl -X POST http://localhost:1000/scroll ^
-  -H "Content-Type: application/json" ^
-  -d "{\"sessionId\":\"YOUR_SESSION_ID\",\"pixels\":800}"
-```
-
-### 7) Capture screenshot
-
-```bash
-curl "http://localhost:1000/screenshot?sessionId=YOUR_SESSION_ID&fileName=example.png"
-```
-
-### 8) Read console/network failures
-
-```bash
-curl "http://localhost:1000/errors?sessionId=YOUR_SESSION_ID"
-```
-
-### 9) List sessions
-
-```bash
-curl http://localhost:1000/sessions
-```
-
-### 10) Close a session
-
-```bash
-curl -X DELETE http://localhost:1000/session/YOUR_SESSION_ID
-```
-
-## Agent Activity & Manual Interaction Blocking
-
-When the MCP agent is performing browser automation (e.g., clicking, typing, navigating), the system automatically prevents manual user interactions to avoid conflicts. This feature includes:
-
-### Visual Feedback
-- A semi-transparent overlay appears when the agent is active
-- A "Agent is running..." message is displayed in the top-right corner
-- If a user tries to interact while the agent is active, a temporary message appears: "⏳ Agent is currently controlling the browser. Please wait..."
-
-### How It Works
-1. When any agent action starts (via `/click`, `/type`, `/open`, etc.), the browser page sets `window.__mcpAgentActive = true`
-2. Event listeners intercept user interactions (clicks, keystrokes, etc.)
-3. If the agent is active, interactions are blocked and a notification is shown
-4. The agent activity state is tracked per browser session
-
-### Monitoring Agent Activity
-You can monitor agent activity via:
-- `GET /agent/state` - Returns current agent status
-- `GET /agent/events` - Server-Sent Events (SSE) stream for real-time updates
-
-### Manual Interaction Detection
-Even when the agent is not active, manual user interactions are detected and logged via:
-- Server-side notifications sent to connected SSE clients
-- Session scratchpad entries: "⚠ Manual user interaction detected"
-
-## Endpoints
-
-- `POST /open`
-- `POST /click`
-- `POST /type`
-- `POST /scroll`
-- `POST /hover`
-- `POST /wait`
-- `POST /select`
-- `POST /upload`
-- `POST /plan`
-- `POST /flow/:template`
-- `GET /agent/events`
-- `GET /agent/state`
-- `GET /screenshot`
-- `GET /analyze`
-- `GET /errors`
-- `GET /sessions`
-- `DELETE /session/:sessionId`
-- `GET /health`
-
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/open` | Open URL |
+| `POST` | `/click` | Click element |
+| `POST` | `/type` | Type text |
+| `POST` | `/scroll` | Scroll page |
+| `POST` | `/hover` | Hover element |
+| `POST` | `/select` | Select option |
+| `POST` | `/wait` | Wait for element |
+| `POST` | `/fill_form` | Fill form fields |
+| `POST` | `/plan` | Execute goal plan |
+| `POST` | `/flow/:template` | Execute flow template |
+| `GET` | `/screenshot` | Take screenshot |
+| `GET` | `/analyze` | Analyze DOM |
+| `GET` | `/inspect` | Full page inspection |
+| `GET` | `/errors` | Console/network errors |
+| `GET` | `/sessions` | List sessions |
+| `DELETE` | `/session/:id` | Close session |
+| `GET` | `/health` | Health check |
+| `GET` | `/agent/events` | Agent activity SSE stream |
+| `GET` | `/agent/state` | Agent activity state |
 
 ---
 
-## Agent Instructions (For Cursor, Roo Code, etc.)
+## Architecture
 
-If you are an AI model using this server:
-1.  **See the Page**: When taking screenshots, use embedImage: true and saveLocal: false to show the image directly to the user in the chat without clogging their drive.
-2.  **Understand State**: Use rowser_analyze before any interaction to get valid selectors and page structure.
-3.  **Efficiency**: Batch your inputs using rowser_fill_form.
-4.  **Stealth**: Never simulate typing or clicking with text symbols; use the dedicated tools to ensure human-like behavior.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for details on:
+- Dual-transport model (STDIO + HTTP)
+- Interaction Lock ("Iron Curtain")
+- Smart Settle Logic
+- Session Persistence
+- Vision AI integration
+- Dynamic Selector Resolution
+
+---
+
+## Project Structure
+
+```
+MCP-SERVER/
+├── mcp-server.js          # Entry point (imports src/mcpServer.js)
+├── src/
+│   ├── mcpServer.js        # MCP server, tool registration, STDIO transport
+│   ├── app.js              # Express HTTP app, REST API, SSE
+│   ├── config.js           # Environment config loader
+│   ├── routes/
+│   │   └── browserRoutes.js # Legacy REST endpoints
+│   ├── services/
+│   │   ├── browserService.js       # Core Playwright automation engine
+│   │   ├── visionService.js        # Gemini Vision AI integration
+│   │   ├── figmaService.js         # Figma API integration
+│   │   ├── scratchpadService.js    # Isolated temp file management
+│   │   ├── projectSyncService.js   # Root safety & auto-cleanup
+│   │   └── agentActivityService.js # Agent activity tracking & SSE
+│   ├── utils/
+│   │   └── response.js     # Standard response formatter
+│   └── static/
+│       ├── dashboard.html  # Management dashboard UI
+│       └── style.css       # Dashboard styles
+├── .mcp_data/              # Managed data directory (gitignored)
+│   ├── screenshots/
+│   ├── downloads/
+│   ├── scratchpad/
+│   └── user_data/
+├── .clinerules             # AI rules for Cline/Roo Code
+├── .cursorrules            # AI rules for Cursor
+├── ARCHITECTURE.md         # Technical architecture docs
+├── MCP_TOOL_GUIDE.md       # Canonical tool catalog for AI agents
+└── PROMPT_FOR_ANY_AI.md    # REST API guide for non-MCP AIs
+```

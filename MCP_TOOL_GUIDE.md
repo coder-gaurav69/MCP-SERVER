@@ -1,193 +1,198 @@
 # Browser Automation MCP Tool Guide
 
-## 🚨 CRITICAL BEHAVIOR: EXTERNAL BROWSER FIRST
-- Whenever a URL is mentioned, or the task involves "opening", "checking", or "fixing" a website, you MUST use `browser_open` IMMEDIATELY.
-- DO NOT ask for permission to open the external browser. 
-- DO NOT use internal web search if the goal is to see/test a specific page.
-- The user wants a "Real Experience" — this means they want to see the Chrome window pop up on their screen for EVERY web task.
+## TL;DR — 5-Step Quickstart
 
-Read this file first when using this MCP server. It is the canonical one-file index for available tools and usage rules. Do not scan the whole repository just to discover tools. Read implementation files only when you are editing or debugging the server itself.
+```
+1. browser_sessions        → Check for existing sessions (ALWAYS first)
+2. browser_open { url }    → Open URL / reuse session
+3. browser_analyze { sid } → Find valid selectors & page structure
+4. browser_click/type/fill → Interact with the page
+5. browser_screenshot      → Verify result visually (embedImage: true)
+```
+
+> [!WARNING]
+> **DO NOT** use `curl` or terminal HTTP commands. This is an **MCP STDIO** server.
+> Use your native MCP tool calls. Port 1000 is the dashboard, NOT for tool execution.
+
+> [!IMPORTANT]
+> **DO NOT** create any files in the project root. Use `browser_scratchpad_write` for temp files.
+> The server **auto-deletes** root clutter on startup.
+
+---
 
 ## Strict Agent Rules
 
-- Always check the available MCP tools before answering a task.
-- NEVER attempt to read executable tools as resources (e.g., trying to read `mcp://browser-automation/browser_open`). Tools MUST be called via the tool execution interface, not the resource read interface. Tools are actions, not statically readable URIs.
-- If a real MCP tool can perform the action, call the tool. Do not simulate opening a browser, clicking, typing, scrolling, uploading, or taking screenshots in text.
-- If a URL is mentioned and the task is to open, test, inspect, debug, or interact with it, use `browser_open`.
-- `open_browser` is a compatibility alias for prompts that use that name. New prompts should prefer `browser_open`.
-- **ALWAYS** call `browser_sessions` before `browser_open` — reuse existing sessions instead of creating new ones.
-- **ALWAYS** use `browser_scratchpad_write` for temporary files — NEVER create test files in the user's project.
-- **ALWAYS** take screenshots after changes to verify them visually.
-- If the client requires JSON-only tool routing, output only valid JSON in this shape:
+- Call `browser_sessions` before `browser_open` — **always reuse** existing sessions.
+- Call `browser_analyze` before any click/type — **never guess selectors**.
+- Use `browser_fill_form` for forms — **5x faster** than repeated `browser_type`.
+- Use `browser_scratchpad_write` for temp files — **never** create files in the project.
+- Set `embedImage: true`, `saveLocal: false` on screenshots.
+- After every change, take a `browser_screenshot` to verify.
+- NEVER access tools as MCP resource URIs (e.g., `mcp://browser-automation/browser_open` is INVALID).
 
+### Calling Convention (Wrapper Clients)
+
+If your client uses `use_mcp_tool`, pass args inside `nativeArgs`:
 ```json
-{
-  "tool": "browser_open",
-  "arguments": {
-    "url": "https://example.com"
-  }
-}
+{ "server_name": "browser-automation", "tool_name": "browser_open", "nativeArgs": { "url": "https://example.com" } }
 ```
 
-- If the MCP client supports native tool calls, call the native tool directly instead of printing pretend JSON.
-- If no relevant tool exists, answer normally and say what cannot be executed.
+### JSON-Only Tool Routing
 
-## First Call
+If the client requires raw JSON output:
+```json
+{ "tool": "browser_open", "arguments": { "url": "https://example.com" } }
+```
 
-To retrieve this guide from the running MCP server without reading random project files, simply execute the tool:
-- **MCP tool:** `browser_tool_guide`
-
-*(Note: Do not try to access this as an `mcp://` URI resource unless specifically instructed by your core system prompt. The safest method is always calling the tool).*
-
-## Recommended Workflow
-
-1. Call `browser_sessions` to check for existing sessions.
-2. Open a URL with `browser_open` (reuses existing sessions automatically).
-3. Inspect page state with `browser_analyze` or `browser_inspect`.
-4. Act with `browser_click`, `browser_type`, `browser_fill_form`, `browser_select`, `browser_scroll`, `browser_hover`, `browser_wait`, or `browser_upload`.
-5. Verify with `browser_screenshot`, `browser_errors`, `browser_test_page`, `browser_state`, or `browser_inspect`.
-6. Close the session with `browser_close_session` when finished.
+---
 
 ## Tool Catalog
 
 ### Guide
 
-- `browser_tool_guide`: Return this canonical guide from the running MCP server.
+| Tool | Description |
+|------|-------------|
+| `browser_tool_guide` | Returns this guide from the running server |
 
-### Session and Navigation
+### Session & Navigation
 
-- `browser_open`: Open a URL. Creates a session if `sessionId` is omitted. Reuses existing sessions for the same domain. Optional args: `headless`, `persist`.
-- `open_browser`: Compatibility alias for `browser_open`.
-- `browser_close_session`: Close a session. Optional `cleanup` removes screenshots, downloads, and persisted user data for that session.
-- `browser_sessions`: List active sessions. **Call this BEFORE browser_open.**
-- `browser_reconnect`: Reconnect to a session that may have become unresponsive. Use this instead of closing + recreating.
+| Tool | Description |
+|------|-------------|
+| `browser_open` | Open a URL. Creates or reuses a session. Args: `url` (required), `sessionId`, `headless`, `persist` |
+| `open_browser` | Alias for `browser_open` (backward compat) |
+| `browser_close_session` | Close a session. `cleanup=true` removes all session data |
+| `browser_sessions` | List active sessions. **Call this BEFORE browser_open** |
+| `browser_reconnect` | Reconnect to an unresponsive session (better than close + recreate) |
 
-### Interaction (Single)
+### Single Interaction
 
-- `browser_click`: Click by CSS `selector` or natural-language `query`. Use `settlePolicy` ('lazy', 'normal', 'strict') to control wait behavior.
-- `browser_type`: Type text into one input. Automatic clearing is handled.
-- `browser_hover`: Hover pointer over an element.
-- `browser_scroll`: Scroll vertically by `pixels`.
-- `browser_select`: Select an option in a `<select>` OR custom dropdown. Supports `value`, `label`, or `index`.
-- `browser_press_key`: Press a keyboard key (e.g., 'Enter', 'Tab').
-- `browser_upload`: Upload a file to a file input.
-- `browser_wait`: Wait for a selector, query, text, or timeout.
-- `browser_generate_pdf`: Generate a high-quality PDF of the current page.
+| Tool | Description |
+|------|-------------|
+| `browser_click` | Click by `selector` (CSS) or `query` (natural language). `settlePolicy`: lazy/normal/strict |
+| `browser_type` | Type text into one input. **Prefer browser_fill_form for multiple fields** |
+| `browser_hover` | Hover over an element |
+| `browser_scroll` | Scroll by `pixels` (+ down, - up). Default: 600 |
+| `browser_select` | Select option in `<select>` or custom dropdown. Accepts `value`, `label`, or `index` |
+| `browser_press_key` | Press keyboard key (Enter, Tab, Escape, Control+C, etc.) |
+| `browser_upload` | Upload file to a file input. Args: `filePath` (absolute) |
+| `browser_wait` | Wait for selector, query, text, or timeout |
+| `browser_generate_pdf` | Export current page as PDF |
 
-### Batch Actions
+### Batch Actions (FAST)
 
-- `browser_fill_form`: Fill multiple fields in one call. Use this for speed.
-- `browser_flow`: Execute built-in templates: `login`, `signup`, or `formSubmission`.
-- `browser_plan`: Generate and execute a multi-step plan for a goal.
+| Tool | Description |
+|------|-------------|
+| `browser_fill_form` | Fill multiple fields in ONE call: `{ "Name": "John", "Email": "j@ex.com" }` |
+| `browser_flow` | Execute template: `login`, `signup`, or `formSubmission` |
+| `browser_plan` | Generate & execute a multi-step plan for a goal |
 
-### Inspection, Testing, and Design Extraction
+### Inspection & Testing
 
-- `browser_analyze`: Analyze DOM and interactive elements.
-- `browser_inspect`: DOM analysis + errors + scratchpad.
-- `browser_element_styles`: Extract computed CSS and layout for one element.
-- `browser_page_style_map`: Sample visible DOM nodes with computed styles.
-- `browser_test_page`: Health check for images, SEO, and errors.
-- `browser_extract_blueprint`: High-fidelity JSON blueprint for UI cloning.
-- `browser_get_palette`: Extract dominant color palette and fonts.
-- `browser_errors`: Get collected console and network errors.
-- `browser_screenshot`: Take a screenshot. Optional `fullPage` and `embedImage`.
-- `browser_auto_explore`: Discover and visit navigation routes.
+| Tool | Description |
+|------|-------------|
+| `browser_analyze` | Analyze DOM + interactive elements with optimized selectors |
+| `browser_inspect` | Full inspection: DOM + errors + scratchpad |
+| `browser_element_styles` | Computed CSS + layout for one element |
+| `browser_page_style_map` | Sample visible DOM nodes with computed styles |
+| `browser_test_page` | Health check: broken images, SEO, console errors |
+| `browser_extract_blueprint` | High-fidelity JSON blueprint for UI cloning |
+| `browser_get_palette` | Extract dominant colors and fonts |
+| `browser_errors` | Get console and network errors |
+| `browser_screenshot` | Screenshot. Default: `embedImage=true`, `saveLocal=false` |
+| `browser_auto_explore` | Discover and visit navigation routes |
 
 ### Deep Clone (Pixel-Perfect)
 
-- `browser_deep_clone`: Extract EVERYTHING for pixel-perfect cloning: all CSS rules (including :hover, :focus, :active, @keyframes), font-faces, asset URLs, DOM tree with computed styles. Takes reference screenshot.
+| Tool | Description |
+|------|-------------|
+| `browser_deep_clone` | Extract ALL CSS, fonts, assets, DOM tree for pixel-perfect cloning |
 
 ### Vision AI (Gemini Flash — Free)
 
-> [!NOTE]
-> Vision tools require `GEMINI_API_KEY` in your `.env` file. Get a free key at [aistudio.google.com](https://aistudio.google.com).
+> Requires `GEMINI_API_KEY` in `.env`. Free at [aistudio.google.com](https://aistudio.google.com).
 
-- `browser_vision_analyze`: Take screenshot + AI analysis with custom prompt. Describes layout, colors, fonts, spacing, effects.
-- `browser_vision_compare`: Compare current page with a reference screenshot. Returns similarity score (0-100) + differences list.
-- `browser_vision_hover`: Hover element + AI-analyze the visual effect. Returns suggested CSS :hover rules.
-- `browser_vision_design_system`: Extract complete visual design system from screenshot (colors, typography, spacing, style).
+| Tool | Description |
+|------|-------------|
+| `browser_vision_analyze` | Screenshot + AI analysis with custom prompt |
+| `browser_vision_compare` | Compare page with reference. Returns similarity score (0-100) |
+| `browser_vision_hover` | Hover + AI-analyze visual effect. Returns suggested CSS :hover |
+| `browser_vision_design_system` | Extract complete design system from screenshot |
 
-### Agent Scratchpad (Isolated Testing)
+### Figma Integration
 
-> [!IMPORTANT]
-> ALWAYS use these tools for temporary files. NEVER create test files in the user's project.
+> Requires `FIGMA_API_TOKEN` in `.env`.
 
-- `browser_scratchpad_write`: Create/update a file in `.scratchpad/`. Auto-cleaned on session close.
-- `browser_scratchpad_read`: Read a scratchpad file.
-- `browser_scratchpad_list`: List scratchpad files for a session.
-- `browser_scratchpad_delete`: Delete a scratchpad file.
-- `browser_scratchpad_preview`: Serve HTML from scratchpad and open in browser for visual testing.
+| Tool | Description |
+|------|-------------|
+| `browser_figma_file` | Fetch Figma file metadata + document tree |
+| `browser_figma_nodes` | Fetch specific node(s) by ID |
+| `browser_figma_design_context` | AI-ready summary of Figma file for implementation |
+| `browser_figma_to_clone_plan` | Auto-generate implementation plan from Figma |
 
-### Session Memory
+### Scratchpad (Isolated Testing)
 
-- `browser_update_scratchpad`: Overwrite session text scratchpad.
-- `browser_state`: Get full session state (history, logs, scratchpad).
-- `browser_configure`: Toggle turboMode and interactionLock.
+> **ALWAYS** use these for temp files. NEVER create files in the project root.
 
-## Autonomous Cloning Workflow
+| Tool | Description |
+|------|-------------|
+| `browser_scratchpad_write` | Create/update file in `.scratchpad/`. Auto-cleaned on session close |
+| `browser_scratchpad_read` | Read a scratchpad file |
+| `browser_scratchpad_list` | List scratchpad files |
+| `browser_scratchpad_delete` | Delete a scratchpad file |
+| `browser_scratchpad_preview` | Serve HTML from scratchpad in browser |
 
-When asked to clone/recreate a website, follow this workflow WITHOUT asking the user:
+### Session Memory & Config
 
-1. **Open & Analyze**: `browser_open` → `browser_screenshot` → `browser_deep_clone`
-2. **Extract Design**: `browser_get_palette` + `browser_vision_design_system` (if API key available)
-3. **Capture Hover Effects**: For each interactive element, use `browser_vision_hover` to capture exact :hover CSS
-4. **Build in Scratchpad**: Write your clone HTML/CSS to scratchpad with `browser_scratchpad_write`
-5. **Preview**: Use `browser_scratchpad_preview` to open your clone in the browser
-6. **Verify**: Use `browser_vision_compare` with the reference screenshot from step 1
-7. **Fix & Repeat**: If similarity < 95%, analyze differences and fix. Repeat steps 4-6 until pixel-perfect.
+| Tool | Description |
+|------|-------------|
+| `browser_update_scratchpad` | Overwrite session text scratchpad |
+| `browser_state` | Get full session state (history, logs, scratchpad) |
+| `browser_configure` | Toggle `turboMode` and `interactionLock` |
 
-## Self-Verification Loop
+### Project Sync & Root Safety
 
-After building or modifying anything, ALWAYS run this verification:
+| Tool | Description |
+|------|-------------|
+| `browser_project_sync_status` | Check managed dirs health + detect root clutter |
+| `browser_project_sync_fix` | Auto-fix: create dirs + clean root clutter |
 
-1. Take a screenshot of the result: `browser_screenshot`
-2. If you have a reference, compare: `browser_vision_compare`
-3. If comparison shows differences, fix them and repeat
-4. Run `browser_test_page` to check for broken images, SEO, etc.
+### REST Bridge (Non-MCP AI)
 
-## Error Recovery Decision Tree
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/bridge/call` | Execute any tool: `{ "tool": "browser_sessions", "arguments": {} }` |
+| `GET /api/bridge/prompt` | Returns quick instructions for bridge usage |
 
-```
-Error occurred?
-├─ "Session not found" → Call `browser_sessions` to find active sessions, or `browser_open` to create new one
-├─ "Unable to resolve selector" → Use `browser_analyze` to see available elements, try different query/selector
-├─ "Page crashed" → Call `browser_reconnect` to recover the session
-├─ "Timeout" → Increase timeout with `browser_wait`, or use settlePolicy: "strict"
-├─ "Navigation failed" → Check URL, try `browser_open` with same session
-└─ Unknown → `browser_inspect` for full page state + errors, then `browser_screenshot` for visual
-```
+---
 
-## AI Expert Tips
+## Workflows
 
-> [!TIP]
-> - **Session Reuse**: The server automatically reuses sessions for the same domain. Don't create new sessions unnecessarily.
-> - **Custom Dropdowns**: Use `browser_select` even if the element isn't a standard `<select>`. The tool is smart enough to attempt a click-and-search strategy for custom (div/button) based dropdowns.
-> - **Speed**: Use `settlePolicy: "lazy"` for rapid clicking sequences where you don't need the page to fully idle between actions.
-> - **God Mode**: Combine `browser_configure(turboMode: true)` with `browser_fill_form` for near-instant automation.
-> - **PDF Export**: Always use `browser_generate_pdf` for final verification of complex forms or invoices.
-> - **Hover Effects**: Use `browser_vision_hover` instead of manually hovering + screenshotting. It captures before/after and suggests CSS.
-> - **Pixel-Perfect**: Use `browser_deep_clone` → `browser_scratchpad_write` → `browser_scratchpad_preview` → `browser_vision_compare` for iterative cloning.
+### Autonomous Cloning
+
+1. `browser_open` → `browser_screenshot` → `browser_deep_clone`
+2. `browser_get_palette` + `browser_vision_design_system`
+3. For each interactive element: `browser_vision_hover`
+4. Build in scratchpad: `browser_scratchpad_write`
+5. Preview: `browser_scratchpad_preview`
+6. Verify: `browser_vision_compare` (target: >95% similarity)
+7. Fix & repeat until pixel-perfect
+
+### Error Recovery
+
+| Error | Solution |
+|-------|----------|
+| Session not found | `browser_sessions` → find or `browser_open` to create |
+| Selector not found | `browser_analyze` → find valid selectors |
+| Page crashed | `browser_reconnect` |
+| Timeout | `browser_wait` with longer timeout, or `settlePolicy: "strict"` |
+| Navigation failed | Check URL, retry `browser_open` |
+| Unknown | `browser_inspect` + `browser_screenshot` |
+
+---
 
 ## Argument Patterns
 
-- Most page actions require `sessionId`.
-- Element actions accept either `selector` or `query`.
-- Prefer `query` when you know the human-visible target (e.g., `"login button"`).
-- Prefer `selector` when exact DOM targeting is required.
-
-## Technical Calling Convention
-
-If the AI client (e.g., Roo Code, Cliner, Cursor) uses a meta-tool wrapper like `use_mcp_tool` rather than a direct native function call, it MUST adhere to the following JSON structure:
-
-```json
-{
-  "server_name": "browser-automation",
-  "tool_name": "browser_open",
-  "nativeArgs": {
-    "url": "https://example.com"
-  }
-}
-```
-
-> [!WARNING]
-> Failing to use the `nativeArgs` object key when calling via a wrapper will result in "Missing required argument" errors, as the server expects the tool arguments at the top level of the payload it receives from the client.
+- Most tools require `sessionId`
+- Element tools accept `selector` (CSS) or `query` (natural language)
+- Prefer `query` for human-visible targets: `"login button"`
+- Prefer `selector` for exact DOM targeting: `"#submit-btn"`

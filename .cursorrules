@@ -1,32 +1,27 @@
-# 🛡️ PROJECT PROTECTION & FILE ORGANIZATION
-- **ZERO ROOT CLUTTER**: Absolutely NO new files should be created in the project root directory.
-- **MANDATORY DIRECTORIES**:
-    - All source code and logic MUST go into `src/`.
-    - All temporary files, test scripts, demos, or drafts MUST use the `browser_scratchpad_write` tool (stores in `.scratchpad/`).
-    - All assets (images/CSS) MUST go into `src/static/`.
-- **LEGACY CLEANUP**: Frequently check for and delete any `.ps1`, `.js`, or `.json` files that appear in the root unless they are `package.json` or `.env`.
+# ⛔ RULE 1: NEVER CREATE FILES IN THE PROJECT ROOT. NO .json, .ps1, .js, .txt, .html, NOTHING.
+# ⛔ RULE 2: NEVER USE CURL. This is MCP STDIO. Use native tool calls only.
+# ⛔ RULE 3: ALWAYS check browser_sessions before browser_open. Reuse sessions.
 
-# Browser Automation MCP Rules
+# This is an MCP STDIO server (Node.js + Playwright).
+# Port 1000 = dashboard only. NOT for AI tool execution.
 
-Read `ARCHITECTURE.md` and `MCP_TOOL_GUIDE.md` first. These are the canonical references for this project.
+# FILE RULES:
+# - Source code → src/
+# - Temp files / tests / experiments → browser_scratchpad_write tool
+# - Root auto-cleans on startup. Any junk files you create WILL be deleted.
 
-- ---
+# TOOL USAGE:
+# 1. browser_sessions → check existing
+# 2. browser_open { url } → open/reuse
+# 3. browser_analyze { sessionId } → find selectors
+# 4. browser_click / browser_type / browser_fill_form → interact
+# 5. browser_screenshot { sessionId, embedImage: true, saveLocal: false } → verify
 
-> [!WARNING]
-> **IMPORTANT FOR AI AGENTS**: 
-> - **DO NOT USE CURL** to interact with this server. 
-> - This is an **MCP STDIO** server. Use native tool calls only.
-> - The port **1000** is ONLY for the optional management dashboard, NOT for tool execution.
+# CRITICAL:
+# - browser_fill_form > repeated browser_type (5x faster)
+# - browser_analyze BEFORE any click/type (find valid selectors)
+# - embedImage: true, saveLocal: false on screenshots (shows in chat, no disk clutter)
+# - If wrapper like use_mcp_tool: pass args in nativeArgs object
+# - NEVER access tools as resources (mcp://... URIs are INVALID for tools)
 
----
-- **Project Core**: This is a Node.js MCP server using Playwright. It is optimized for AI agents to perform stealthy browser actions.
-- **Immediate Feedback**: ALWAYS use `embedImage: true` and `saveLocal: false` when taking screenshots; this ensures the image appears in the Cursor chat without creating junk files on the user's disk.
-- **Selector Strategy**: Do not guess selectors. Use `browser_analyze` first to see interactive elements and their optimized selectors.
-- **Performance**: Use `browser_fill_form` for forms instead of multiple `browser_type` calls.
-- **Navigation**: Use `browser_open` for first-time visits and `browser_auto_explore` for discovering routes.
-- **Stealth**: Do not simulate opening or clicking in text; use the real MCP tools.
-
-Read implementation files only when editing or debugging the server itself.
-
-- **CRITICAL CALLING RULE**: If you are calling tools via a wrapper like `use_mcp_tool`, you MUST pass the tool arguments inside a `nativeArgs` object (e.g., `nativeArgs: { "url": "..." }`). Failing to do this will cause execution errors.
-- **CRITICAL RESOURCE RULE**: NEVER try to access executable tools as MCP resources by treating them as URIs (e.g. `mcp://browser-automation/browser_open` is INVALID). Tools like `browser_open` are executable actions, NOT read-only resources. Always call them as tools!
+# Read MCP_TOOL_GUIDE.md for full tool catalog.

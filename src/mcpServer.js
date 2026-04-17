@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url";
 import { browserService } from "./services/browserService.js";
 import { visionService } from "./services/visionService.js";
 import { scratchpadService } from "./services/scratchpadService.js";
+import { figmaService } from "./services/figmaService.js";
+import { projectSyncService } from "./services/projectSyncService.js";
 import { createApp } from "./app.js";
 import { config } from "./config.js";
 
@@ -293,6 +295,55 @@ Use this for EVERY URL-related task. The user wants to see the browser window mo
       printBackground: z.boolean().optional().default(true).describe("Whether to include background colors/images")
     },
     (args) => browserService.generatePdf(args)
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Figma Integration ─────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "browser_figma_file",
+    "Fetch a Figma file (by file key or full Figma URL). Returns document tree and metadata for AI-driven design implementation.",
+    {
+      fileKeyOrUrl: z.string().describe("Figma file key or full URL"),
+      depth: z.number().optional().default(3).describe("How deep the document tree should be fetched"),
+      ids: z.string().optional().describe("Optional comma-separated node IDs to focus"),
+      version: z.string().optional().describe("Optional specific file version")
+    },
+    (args) => figmaService.getFile(args)
+  );
+
+  tool(
+    "browser_figma_nodes",
+    "Fetch specific node(s) from a Figma file. Use this for precise components/frames.",
+    {
+      fileKeyOrUrl: z.string().describe("Figma file key or full URL"),
+      nodeIds: z.union([z.string(), z.array(z.string())]).describe("Node ID string (comma-separated) or array of IDs")
+    },
+    (args) => figmaService.getNodes(args)
+  );
+
+  tool(
+    "browser_figma_design_context",
+    "AI-ready design context from Figma: top frames + selected node style/layout details.",
+    {
+      fileKeyOrUrl: z.string().describe("Figma file key or full URL"),
+      nodeIds: z.union([z.string(), z.array(z.string())]).optional().describe("Optional specific node IDs"),
+      depth: z.number().optional().default(4)
+    },
+    (args) => figmaService.getDesignContext(args)
+  );
+
+  tool(
+    "browser_figma_to_clone_plan",
+    "Autopilot planner: converts Figma file/nodes into an actionable same-to-same implementation plan with execution order and verification checklist.",
+    {
+      fileKeyOrUrl: z.string().describe("Figma file key or full URL"),
+      nodeIds: z.union([z.string(), z.array(z.string())]).optional().describe("Optional specific node IDs"),
+      depth: z.number().optional().default(4).describe("Tree depth for extraction"),
+      framework: z.string().optional().default("react-tailwind").describe("Target stack hint, e.g. react-tailwind, html-css, nextjs")
+    },
+    (args) => figmaService.buildClonePlan(args)
   );
 
   tool(
@@ -720,6 +771,26 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
       return { ok: true, status: { turboMode: config.turboMode, interactionLock: config.interactionLock } };
     }
   );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Project Sync & Root Safety ────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "browser_project_sync_status",
+    "Check project sync health: managed .mcp_data directories + root clutter detection.",
+    {},
+    async () => projectSyncService.syncStatus()
+  );
+
+  tool(
+    "browser_project_sync_fix",
+    "Auto-fix project sync issues: ensures managed directories and optionally removes known AI temp clutter from root.",
+    {
+      cleanupRootClutter: z.boolean().optional().default(true)
+    },
+    async ({ cleanupRootClutter }) => projectSyncService.syncFix({ cleanupRootClutter })
+  );
 };
 
 /**
@@ -731,6 +802,9 @@ export const server = new McpServer(serverMetadata, {});
  * Entry point for starting the server in Stdio mode (and the HTTP dashboard).
  */
 export const runServer = async () => {
+  await projectSyncService.ensureManagedDirs();
+  // Auto-clean any junk files that AI agents may have created in root
+  await projectSyncService.autoCleanOnStartup();
   // Register tools on the primary instance
   registerAllTools(server);
 

@@ -7,6 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { registerAllTools, serverMetadata, toolsRegistry } from "./mcpServer.js";
 import { scratchpadService } from "./services/scratchpadService.js";
+import { projectSyncService } from "./services/projectSyncService.js";
 import { config } from "./config.js";
 import { z } from "zod";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,76 @@ export function createApp() {
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   app.use("/static", express.static(path.join(__dirname, "static")));
+
+  const toBooleanLike = (value) => {
+    if (typeof value === "boolean") return value;
+    if (typeof value !== "string") return value;
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+    return value;
+  };
+
+  const toNumberLike = (value) => {
+    if (typeof value === "number") return value;
+    if (typeof value !== "string" || value.trim() === "") return value;
+    const asNumber = Number(value);
+    return Number.isNaN(asNumber) ? value : asNumber;
+  };
+
+  const unwrapOptional = (field) => {
+    let current = field;
+    while (current instanceof z.ZodOptional || current instanceof z.ZodDefault) {
+      current = current._def.innerType;
+    }
+    return current;
+  };
+
+  const normalizeByShape = (rawArgs, shape) => {
+    if (!rawArgs || typeof rawArgs !== "object") return {};
+    const normalized = { ...rawArgs };
+    for (const [key, field] of Object.entries(shape || {})) {
+      if (!(key in normalized)) continue;
+      const fieldType = unwrapOptional(field);
+      if (fieldType instanceof z.ZodBoolean) {
+        normalized[key] = toBooleanLike(normalized[key]);
+      } else if (fieldType instanceof z.ZodNumber) {
+        normalized[key] = toNumberLike(normalized[key]);
+      }
+    }
+    return normalized;
+  };
+
+  const normalizeToolArgs = (tool, rawArgs) => {
+    if (!tool?.schema) return rawArgs || {};
+    const schema = tool.schema;
+    if (schema instanceof z.ZodObject) {
+      return normalizeByShape(rawArgs, schema.shape);
+    }
+    if (typeof schema === "object") {
+      return normalizeByShape(rawArgs, schema);
+    }
+    return rawArgs || {};
+  };
+
+  const executeToolByName = async (toolName, rawArgs) => {
+    registerAllTools();
+    const tool = toolsRegistry.find((t) => t.name === toolName);
+    if (!tool) {
+      return {
+        ok: false,
+        statusCode: 404,
+        payload: failure("toolExecution", `Tool not found: ${toolName}`)
+      };
+    }
+    const args = normalizeToolArgs(tool, rawArgs || {});
+    const result = await tool.handler(args);
+    return {
+      ok: true,
+      statusCode: 200,
+      payload: success(toolName, result)
+    };
+  };
 
   // ─── Scratchpad File Serving ─────────────────────────────
   app.get("/scratchpad/:sessionId/:filename", async (req, res) => {
@@ -269,7 +340,9 @@ export function createApp() {
   app.get("/llms.txt", async (req, res) => {
     registerAllTools();
     let output = "# Browser Automation Universal Server\n\n";
-    output += "This server provides a REST API to control a browser. Endpoint: http://localhost:1000/api/tools/{tool_name}\n\n";
+    output += "⚠️ VERY IMPORTANT INSTRUCTION FOR AI AGENTS ⚠️\n";
+    output += "If you are an agent connected via MCP (e.g., Roo Code, Cursor), DO NOT use `curl` or terminal commands to interact with this server! You MUST use the native MCP Tool Call functions available to you (e.g., call `browser_open` directly through your tool calling interface).\n\n";
+    output += "This server provides a REST API as a fallback for non-MCP agents: http://localhost:1000/api/tools/{tool_name}\n\n";
     output += "## Most Used Tools (Bootstrap)\n\n";
     
     const bootstrap = ['browser_open', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_analyze', 'browser_sessions'];
@@ -304,7 +377,8 @@ export function createApp() {
   app.get("/llms-full.txt", async (req, res) => {
     registerAllTools();
     let output = "# Browser Automation Universal Server\n\n";
-    output += "This server provides a REST API to control a browser. Endpoint: http://localhost:1000/api/tools/{tool_name}\n\n";
+    output += "⚠️ VERY IMPORTANT FOR AI AGENTS: DO NOT use `curl` or terminal commands. Use your NATIVE MCP Tool Interface directly!\n\n";
+    output += "If you absolutely must use REST (non-MCP), the endpoint is: POST http://localhost:1000/api/tools/{tool_name} with JSON body.\n\n";
     output += "## Available Tools\n\n";
     
     for (const tool of toolsRegistry) {
@@ -322,6 +396,25 @@ export function createApp() {
       data: { ok: true },
       error: ""
     });
+  });
+
+  app.get("/api/sync/status", async (_req, res) => {
+    try {
+      const data = await projectSyncService.syncStatus();
+      res.json(success("sync_status", data));
+    } catch (error) {
+      res.status(500).json(failure("sync_status", error));
+    }
+  });
+
+  app.post("/api/sync/fix", async (req, res) => {
+    try {
+      const cleanupRootClutter = req.body?.cleanupRootClutter !== false;
+      const data = await projectSyncService.syncFix({ cleanupRootClutter });
+      res.json(success("sync_fix", data));
+    } catch (error) {
+      res.status(500).json(failure("sync_fix", error));
+    }
   });
 
   // --- Universal REST API Discovery ---
@@ -378,19 +471,52 @@ export function createApp() {
   });
 
   // --- Dynamic Universal REST API Endpoints ---
-  app.post("/api/tools/:toolName", async (req, res) => {
+  app.post("/api/bridge/call", async (req, res) => {
     try {
-      registerAllTools();
-      const { toolName } = req.params;
-      const tool = toolsRegistry.find(t => t.name === toolName);
-
-      if (!tool) {
-        return res.status(404).json(failure("toolExecution", `Tool not found: ${toolName}`));
+      const body = req.body || {};
+      const toolName = body.tool || body.toolName || body.name;
+      if (!toolName) {
+        return res.status(400).json(failure("bridge", "Missing required field: tool/toolName"));
       }
 
-      console.log(`[REST] Executing tool: ${toolName}`);
-      const result = await tool.handler(req.body || {});
-      res.json(success(toolName, result));
+      const rawArgs = body.arguments || body.nativeArgs || body.args || body.params || {};
+      const execution = await executeToolByName(toolName, rawArgs);
+      return res.status(execution.statusCode).json(execution.payload);
+    } catch (error) {
+      return res.status(500).json(failure("bridge", error));
+    }
+  });
+
+  app.get("/api/bridge/prompt", (_req, res) => {
+    const port = config.port || 1000;
+    res.json(success("bridge_prompt", {
+      endpoint: `http://127.0.0.1:${port}/api/bridge/call`,
+      requestShape: {
+        tool: "browser_sessions",
+        arguments: {}
+      },
+      notes: [
+        "Use POST with JSON body.",
+        "arguments/nativeArgs/args/params are all accepted.",
+        "For WebFetch wrappers, keep format=text|markdown|html only."
+      ]
+    }));
+  });
+
+  app.all("/api/tools/:toolName", async (req, res) => {
+    try {
+      // Only allow GET and POST
+      if (req.method !== "POST" && req.method !== "GET") {
+        return res.status(405).json(failure("toolExecution", "Method Not Allowed"));
+      }
+      
+      const { toolName } = req.params;
+      console.log(`[REST] Executing tool (${req.method}): ${toolName}`);
+      
+      // For GET requests, we can try to parse query parameters as input if needed
+      const rawArgs = req.method === "POST" ? (req.body || {}) : (req.query || {});
+      const execution = await executeToolByName(toolName, rawArgs);
+      res.status(execution.statusCode).json(execution.payload);
     } catch (error) {
       console.error(`[REST ERROR] ${req.params.toolName}:`, error);
       res.status(500).json(failure(req.params.toolName, error));

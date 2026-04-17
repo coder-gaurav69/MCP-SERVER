@@ -134,13 +134,17 @@ router.get("/screenshot", async (req, res) => {
     const fileName = req.query.fileName;
     if (!sessionId) return res.status(400).json(failure("screenshot", "Missing required query: sessionId"));
     const fullPage = String(req.query.fullPage || "").toLowerCase();
-    const embedImage = ["true", "1", "yes", "y"].includes(String(req.query.embedImage || "").toLowerCase());
+    const embedImageQuery = String(req.query.embedImage || "").toLowerCase();
+    const saveLocalQuery = String(req.query.saveLocal || "").toLowerCase();
+    const embedImage = embedImageQuery === "" ? true : ["true", "1", "yes", "y"].includes(embedImageQuery);
+    const saveLocal = ["true", "1", "yes", "y"].includes(saveLocalQuery);
     const data = await runAgentAction("screenshot", () =>
       browserService.screenshot({
         sessionId,
         fileName,
         fullPage: ["true", "1", "yes", "y"].includes(fullPage),
-        embedImage
+        embedImage,
+        saveLocal
       })
     );
     return res.json(success("screenshot", data));
@@ -305,7 +309,17 @@ router.post("/generate_pdf", async (req, res) => {
     if (!sessionId) {
       return res.status(400).json(failure("generate_pdf", "Missing required field: sessionId"));
     }
-    const data = await runAgentAction("generate_pdf", () => browserService.generatePdf({ sessionId, fileName, format, landscape, printBackground }));
+    const data = await runAgentAction("generate_pdf", () =>
+      browserService.generatePdf({
+        sessionId,
+        fileName,
+        format,
+        landscape: ["true", "1", "yes", "y"].includes(String(landscape).toLowerCase()),
+        printBackground: printBackground === undefined
+          ? true
+          : ["true", "1", "yes", "y"].includes(String(printBackground).toLowerCase())
+      })
+    );
     return res.json(success("generate_pdf", data));
   } catch (error) {
     return res.status(500).json(failure("generate_pdf", error));

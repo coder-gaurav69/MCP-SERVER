@@ -1,46 +1,40 @@
-# 🛡️ PROJECT PROTECTION & FILE ORGANIZATION
-- **ZERO ROOT CLUTTER**: Absolutely NO new files should be created in the project root directory.
-- **MANDATORY DIRECTORIES**:
-    - All source code and logic MUST go into `src/`.
-    - All temporary files, test scripts, demos, or drafts MUST use the `browser_scratchpad_write` tool (stores in `.scratchpad/`).
-    - All assets (images/CSS) MUST go into `src/static/`.
-- **LEGACY CLEANUP**: Frequently check for and delete any `.ps1`, `.js`, or `.json` files that appear in the root unless they are `package.json` or `.env`.
+# ⛔ RULE 1: NEVER CREATE FILES IN THE PROJECT ROOT. NO .json, .ps1, .js, .txt, .html, NOTHING.
+# ⛔ RULE 2: NEVER USE CURL OR TERMINAL HTTP TO CALL THIS SERVER. USE NATIVE MCP TOOL CALLS ONLY.
+# ⛔ RULE 3: ALWAYS CALL browser_sessions BEFORE browser_open. REUSE EXISTING SESSIONS.
 
-# 🚨 CRITICAL BEHAVIOR: EXTERNAL BROWSER FIRST
-- Whenever a URL is mentioned, or the task involves "opening", "checking", or "fixing" a website, you MUST use `browser_open` IMMEDIATELY.
-- DO NOT ask for permission to open the external browser. 
-- DO NOT use internal web search if the goal is to see/test a specific page.
-- The user wants a "Real Experience" — this means they want to see the Chrome window pop up on their screen for EVERY web task.
+# ───────────────────────────────────────────────────────────
+# This is an MCP STDIO server (Playwright browser automation).
+# Transport: JSON-RPC over STDIN/STDOUT.
+# Port 1000 is the dashboard ONLY — NOT for AI tool execution.
+# ───────────────────────────────────────────────────────────
 
-# Browser Automation MCP Rules
+# WHERE TO PUT FILES:
+# - Source code/logic → src/
+# - Temp files, tests, drafts, HTML experiments → use browser_scratchpad_write tool
+# - NEVER create files in root. The server auto-deletes root clutter on startup.
 
-Read `MCP_TOOL_GUIDE.md` first. It is the canonical tool index and usage policy for this project.
+# HOW TO USE BROWSER TOOLS:
+# 1. Call browser_sessions → check for existing sessions
+# 2. Call browser_open { url: "..." } → opens browser (reuses session if same domain)
+# 3. Call browser_analyze { sessionId: "..." } → find valid selectors
+# 4. Call browser_click / browser_type / browser_fill_form → interact
+# 5. Call browser_screenshot { sessionId: "..." } → verify visually
 
-## Core Rules
-- Do not scan the whole repository just to discover tools.
-- Use real MCP tools for browser actions; do not simulate opening, clicking, typing, scrolling, uploading, or screenshots in text.
-- Use `browser_open` for URLs. `open_browser` is a compatibility alias for prompts that use that name.
-- Use `browser_analyze` or `browser_inspect` before acting when page state is unknown.
-- Use `browser_fill_form` for multiple fields instead of repeated `browser_type` calls.
-- Read implementation files only when editing or debugging the server itself.
+# KEY TOOL RULES:
+# - Use browser_fill_form for multiple fields (5x faster than repeated browser_type)
+# - Use browser_analyze BEFORE clicking/typing to discover valid selectors
+# - Use browser_scratchpad_write for ALL temporary files
+# - Set embedImage: true, saveLocal: false on screenshots
+# - Use settlePolicy: "strict" if page loads slowly
 
-## Critical Calling Rules
-- **CRITICAL CALLING RULE**: If you are calling tools via a wrapper like `use_mcp_tool`, you MUST pass the tool arguments inside a `nativeArgs` object (e.g., `nativeArgs: { "url": "..." }`). Failing to do this will cause execution errors.
-- **CRITICAL RESOURCE RULE**: NEVER try to access executable tools as MCP resources by treating them as URIs (e.g. `mcp://browser-automation/browser_open` is INVALID). Tools like `browser_open` are executable actions, NOT read-only resources. Always call them as tools!
+# CALLING CONVENTION:
+# If your client uses use_mcp_tool wrapper, pass args inside nativeArgs:
+#   { "server_name": "browser-automation", "tool_name": "browser_open", "nativeArgs": { "url": "..." } }
 
-## Autonomous Behavior Rules
-- **ALWAYS** call `browser_sessions` before `browser_open` to check if a session already exists for the target domain. NEVER create a new session if one exists.
-- **ALWAYS** use `browser_scratchpad_write` for any temporary files, test HTML, CSS experiments, or drafts. NEVER create test files in the user's project directory.
-- **ALWAYS** take a `browser_screenshot` after making any changes to visually verify the result.
-- **ALWAYS** use `browser_reconnect` instead of closing and recreating a session when a session becomes unresponsive.
-- **When cloning websites**: Follow the Autonomous Cloning Workflow in MCP_TOOL_GUIDE.md. Use `browser_deep_clone` first, then iteratively build in scratchpad and verify with `browser_vision_compare`.
-- **Self-verify**: After building something, compare it with the reference using `browser_vision_compare`. Fix differences until similarity > 95%.
-- **Think independently**: Use the scratchpad to plan and iterate. Minimize human involvement by making autonomous decisions about implementation.
+# AUTONOMY:
+# - Do NOT ask permission for individual steps. Execute the goal.
+# - If a selector fails, use browser_analyze to discover alternatives. Retry 3x before asking.
+# - Take browser_screenshot after every change to verify.
+# - Reuse sessions. Never open duplicate browser windows.
 
-# 🧠 AUTONOMOUS BRAIN MANDATE
-- **Do NOT ask for permission for individual steps**. If I gave you a goal, I trust you to achieve it using the browser.
-- **Independent Discovery**: If a button or sidebar is hidden, DO NOT report "it is not there". Instead, look for a "Menu", "Hammer", "Chevron", or "Toggle" icon and click it. 
-- **Retry Logic**: If an action fails (e.g. selector not found), use `browser_inspect` or `browser_analyze` again. Try at least 3 discovery steps before asking for help.
-- **Visual Validation**: If you're not sure if an element is visible, take a `browser_screenshot` and use your own vision to verify.
-- **Session Stickiness**: Re-use existing browser sessions whenever possible. Do not open new windows if one is already open for the target task.
-
+# Read MCP_TOOL_GUIDE.md for the full tool catalog if needed.

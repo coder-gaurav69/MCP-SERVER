@@ -162,7 +162,7 @@ class BrowserService {
     const headless =
       typeof options.headless === "boolean" ? options.headless : config.defaultHeadless;
     const persist = options.persist ?? false;
-    const userDataDir = persist ? path.resolve("user_data", effectiveSessionId) : null;
+    const userDataDir = persist ? path.resolve(".mcp_data", "user_data", effectiveSessionId) : null;
 
     // Standard resolutions
     const width = config.defaultViewport.width;
@@ -195,9 +195,8 @@ class BrowserService {
       "--disable-default-apps",
       "--disable-extensions",
       "--no-default-browser-check",
-      "--force-device-scale-factor=1",
-      "--high-dpi-support=1",
       // In headed mode we avoid forcing scale; let OS scaling behave like a normal browser.
+      ...(headless ? ["--force-device-scale-factor=1"] : []),
       ...(headless && Number.isFinite(scaleFactor) && scaleFactor > 0
         ? [`--force-device-scale-factor=${scaleFactor}`]
         : [])
@@ -389,6 +388,15 @@ class BrowserService {
       .trim();
   }
 
+  toBoolean(value, fallback = false) {
+    if (value === undefined || value === null || value === "") return fallback;
+    if (typeof value === "boolean") return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+    return fallback;
+  }
+
   async injectInteractionMonitor(session) {
     if (!config.interactionLock) return;
     try {
@@ -417,65 +425,96 @@ class BrowserService {
           overlay.style.cssText = `
             position: fixed;
             top: 0; left: 0; width: 100vw; height: 100vh;
-            background: rgba(0, 0, 0, 0.05);
             z-index: 2147483645;
             display: ${window.__mcpAgentActive ? 'block' : 'none'};
             pointer-events: all;
-            cursor: wait;
-            transition: opacity 0.3s ease;
+            cursor: not-allowed;
+            transition: opacity 0.4s ease;
             opacity: ${window.__mcpAgentActive ? '1' : '0'};
             user-select: none;
           `;
+
+          const vignette = document.createElement('div');
+          vignette.style.cssText = `
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(ellipse at center, transparent 40%, rgba(99, 102, 241, 0.1) 100%);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            mask-image: radial-gradient(ellipse at center, transparent 60%, black 100%);
+            -webkit-mask-image: radial-gradient(ellipse at center, transparent 60%, black 100%);
+            box-shadow: inset 0 0 120px rgba(99, 102, 241, 0.25);
+            pointer-events: none;
+            z-index: 1;
+          `;
+          overlay.appendChild(vignette);
 
           const pulseBorder = document.createElement('div');
           pulseBorder.id = '__mcpAgentPulseBorder';
           pulseBorder.style.cssText = `
             position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            border: 0px solid rgba(239, 68, 68, 0);
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            border: 4px solid transparent;
+            box-sizing: border-box;
             pointer-events: none;
             z-index: 2147483646;
-            transition: all 0.2s ease;
+            transition: border-color 0.3s ease, transform 0.2s ease;
           `;
 
           const controlCenter = document.createElement('div');
           controlCenter.style.cssText = `
             position: fixed;
-            bottom: 80px;
+            bottom: 40px;
             left: 50%;
             transform: translateX(-50%);
-            background: rgba(15, 23, 42, 0.95);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            color: white;
-            padding: 12px 24px;
-            border-radius: 9999px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
-            font-family: system-ui, -apple-system, sans-serif;
+            background: rgba(15, 20, 30, 0.85);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #ffffff;
+            padding: 16px 32px;
+            border-radius: 24px;
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
             display: flex;
             align-items: center;
-            gap: 12px;
-            transition: transform 0.1s ease;
+            gap: 16px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            max-width: 90vw;
+            z-index: 2;
           `;
 
           const style = document.createElement('style');
           style.textContent = `
-            @keyframes mcp-blink { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
-            @keyframes mcp-shake-small { 0%, 100% { transform: translateX(-50%); } 25% { transform: translateX(-52%); } 75% { transform: translateX(-48%); } }
-            .mcp-shake-small { animation: mcp-shake-small 0.3s ease-in-out; }
-            .mcp-pulse-active { border: 4px solid rgba(239, 68, 68, 0.5) !important; box-shadow: inset 0 0 50px rgba(239, 68, 68, 0.2); }
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+            @keyframes mcp-glow-pulse {
+              0%, 100% { box-shadow: 0 0 20px rgba(99, 102, 241, 0.4); opacity: 0.8; }
+              50% { box-shadow: 0 0 40px rgba(99, 102, 241, 0.8); opacity: 1; }
+            }
+            @keyframes mcp-border-pulse {
+              0%, 100% { border-color: rgba(239, 68, 68, 0); transform: scale(1); }
+              50% { border-color: rgba(239, 68, 68, 0.8); transform: scale(0.998); }
+            }
+            @keyframes mcp-shake-small {
+              0%, 100% { transform: translateX(-50%); }
+              25% { transform: translateX(calc(-50% - 4px)); }
+              75% { transform: translateX(calc(-50% + 4px)); }
+            }
+            .mcp-shake-small { animation: mcp-shake-small 0.3s cubic-bezier(.36,.07,.19,.97) both; }
+            .mcp-pulse-active { animation: mcp-border-pulse 0.5s ease-in-out; }
             
             #mcp-ghost-cursor {
               position: fixed;
-              width: 12px;
-              height: 12px;
-              background: #ef4444;
+              width: 14px;
+              height: 14px;
+              background: linear-gradient(135deg, #6366f1, #a855f7);
               border: 2px solid white;
               border-radius: 50%;
               pointer-events: none;
               z-index: 2147483647;
               transform: translate(-50%, -50%);
-              transition: transform 0.1s ease-out, opacity 0.3s ease-in-out;
-              box-shadow: 0 0 10px rgba(239, 68, 68, 0.8), 0 0 0 4px rgba(239, 68, 68, 0.2);
+              transition: transform 0.15s cubic-bezier(0.2, 0, 0, 1), opacity 0.3s ease;
+              box-shadow: 0 4px 12px rgba(99, 102, 241, 0.5), 0 0 0 4px rgba(99, 102, 241, 0.2);
               opacity: 0;
             }
           `;
@@ -486,16 +525,17 @@ class BrowserService {
           document.documentElement.appendChild(ghostCursor);
 
           const pulse = document.createElement('div');
-          pulse.style.cssText = `width: 12px; height: 12px; background: #3b82f6; border-radius: 50%; animation: mcp-blink 1.5s infinite ease-in-out;`;
+          pulse.style.cssText = `width: 16px; height: 16px; background: #6366f1; border-radius: 50%; animation: mcp-glow-pulse 2s infinite ease-in-out;`;
 
           const textWrapper = document.createElement('div');
-          textWrapper.style.cssText = `display: flex; flex-direction: column;`;
+          textWrapper.style.cssText = `display: flex; flex-direction: column; gap: 4px;`;
           const title = document.createElement('span');
-          title.style.cssText = `font-size: 14px; font-weight: 600;`;
-          title.textContent = 'Agent is working...';
+          title.style.cssText = `font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: #ffffff;`;
+          title.textContent = 'Antigravity Agent is Working ✨';
           const subtitle = document.createElement('span');
-          subtitle.style.cssText = `font-size: 11px; color: #94a3b8;`;
-          subtitle.textContent = 'Interaction locked for stability';
+          subtitle.style.cssText = `font-size: 13px; font-weight: 400; color: #94a3b8; letter-spacing: 0.01em;`;
+          subtitle.textContent = 'User interaction temporarily disabled to ensure stability.';
+
 
           textWrapper.appendChild(title);
           textWrapper.appendChild(subtitle);
@@ -733,7 +773,7 @@ class BrowserService {
       session._agentLockTimer = setTimeout(async () => {
         await this._sendAgentActiveState(session, false);
         session._agentLockTimer = null;
-      }, 1200);
+      }, 4000); // 4 seconds covers standard AI agent thinking time
     }
   }
 
@@ -1074,7 +1114,14 @@ class BrowserService {
 
       await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
       await locator.fill("");
-      await locator.fill(String(text));
+      
+      if (config.turboMode) {
+        await locator.fill(String(text));
+      } else {
+        await locator.pressSequentially(String(text), { delay: Math.floor(Math.random() * 40) + 20 });
+        await new Promise(r => setTimeout(r, 400));
+      }
+      
       await this.waitForSettle(session);
 
       this.appendScratchpad(session, `Typed into "${query || selector}": "${String(text).slice(0, 30)}..."`);
@@ -1145,8 +1192,8 @@ class BrowserService {
           if (config.turboMode) {
             await locator.fill(String(value));
           } else {
-            await locator.pressSequentially(String(value), { delay: Math.floor(Math.random() * 40) + 20 });
-            await new Promise(r => setTimeout(r, 300)); // Brief pause purely for visual feedback
+            await locator.pressSequentially(String(value), { delay: Math.floor(Math.random() * 50) + 60 });
+            await new Promise(r => setTimeout(r, 450)); // More visible typing for headed browser UX
           }
         }
 
@@ -1170,7 +1217,7 @@ class BrowserService {
     };
   }
 
-  async screenshot({ sessionId, fileName, fullPage = false, embedImage = false, saveLocal = true }) {
+  async screenshot({ sessionId, fileName, fullPage = false, embedImage = true, saveLocal = false }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
 
@@ -1450,14 +1497,17 @@ class BrowserService {
     const root = this.sessionScreenshotRoot(session.id);
     await fs.mkdir(root, { recursive: true });
     const rawName = fileName || `export-${Date.now()}.pdf`;
-    const safeName = rawName.endsWith(".pdf") ? rawName : `${rawName}.pdf`;
+    const normalizedLandscape = this.toBoolean(landscape, false);
+    const normalizedPrintBackground = this.toBoolean(printBackground, true);
+    const cleanRawName = String(rawName).replace(/[^\w.\-() ]/g, "_");
+    const safeName = cleanRawName.endsWith(".pdf") ? cleanRawName : `${cleanRawName}.pdf`;
     const absolutePath = path.resolve(root, safeName);
 
     await session.page.pdf({
       path: absolutePath,
       format,
-      landscape,
-      printBackground,
+      landscape: normalizedLandscape,
+      printBackground: normalizedPrintBackground,
       margin: { top: "20px", bottom: "20px", left: "20px", right: "20px" }
     });
 

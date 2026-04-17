@@ -26,17 +26,17 @@ export const config = {
   // Typical values: 1, 0.9, 0.8, 1.25, 1.5
   // NOTE: keep empty by default; only use if explicitly set (mostly useful for headless consistency).
   browserScaleFactor: process.env.BROWSER_SCALE_FACTOR ? Number(process.env.BROWSER_SCALE_FACTOR) : null,
-  screenshotDir: process.env.SCREENSHOT_DIR || "screenshots",
+  screenshotDir: process.env.SCREENSHOT_DIR || ".mcp_data/screenshots",
   /** When true, screenshots are stored under screenshots/<sessionId>/ and removed entirely on cleanup. */
   sessionScreenshotSubdirs: toBoolean(process.env.SESSION_SCREENSHOT_SUBDIRS, true),
-  downloadsDir: process.env.DOWNLOADS_DIR || "downloads",
+  downloadsDir: process.env.DOWNLOADS_DIR || ".mcp_data/downloads",
   autoCleanup: toBoolean(process.env.AUTO_CLEANUP, false),
   defaultViewport: {
     width: Number(process.env.VIEWPORT_WIDTH || 1920),
     height: Number(process.env.VIEWPORT_HEIGHT || 1080)
   },
   stealthMode: toBoolean(process.env.STEALTH_MODE, true),
-  turboMode: toBoolean(process.env.TURBO_MODE, true),
+  turboMode: toBoolean(process.env.TURBO_MODE, false),
   interactionLock: toBoolean(process.env.INTERACTION_LOCK, true),
 
   // ─── Vision AI (Gemini Flash) ────────────────────────────
@@ -45,8 +45,12 @@ export const config = {
   visionModel: process.env.VISION_MODEL || "gemini-2.0-flash",
   visionMaxTokens: Number(process.env.VISION_MAX_TOKENS || 4096),
 
+  // ─── Figma API ───────────────────────────────────────────
+  figmaApiToken: process.env.FIGMA_API_TOKEN || "",
+  figmaApiBaseUrl: process.env.FIGMA_API_BASE_URL || "https://api.figma.com/v1",
+
   // ─── Agent Scratchpad ────────────────────────────────────
-  scratchpadDir: process.env.SCRATCHPAD_DIR || ".scratchpad",
+  scratchpadDir: process.env.SCRATCHPAD_DIR || ".mcp_data/scratchpad",
 
   // ─── Session Persistence ─────────────────────────────────
   /** When true, browser_open will reuse an existing session for the same domain instead of creating a new one. */

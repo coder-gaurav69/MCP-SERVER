@@ -4,5 +4,8 @@ screenshots/
 downloads/
 user_data/
 .scratchpad/
+.mcp_data/
 *.vsix
+*.ps1
+*.log
 .env

@@ -49,6 +49,11 @@ Every action (click, type, select) is followed by a `waitForSettle` call.
 - Auto-cleaned on session close
 - HTML preview via local HTTP server
 
+### Project Sync & Root Safety
+- Startup enforces managed directories under `.mcp_data/` for artifacts and persistence.
+- Built-in sync tools can detect and clean known AI-generated temporary clutter in project root.
+- This keeps browser artifacts, scratch files, and persistent session data centralized and prevents root pollution.
+
 ### Dynamic Selector Resolution
 The server uses multiple strategies to find elements:
 1.  **Direct CSS**: Fastest, exact target.
