@@ -111,7 +111,8 @@ router.post("/click", async (req, res) => {
     const data = await runAgentAction("click", () => browserService.click({ sessionId, selector, query, settlePolicy }));
     return res.json(success("click", data));
   } catch (error) {
-    return res.status(500).json(failure("click", error));
+    const status = error.message.includes("not found") || error.message.includes("Unable to resolve") ? 400 : 500;
+    return res.status(status).json(failure("click", error));
   }
 });
 
@@ -124,7 +125,8 @@ router.post("/type", async (req, res) => {
     const data = await runAgentAction("type", () => browserService.type({ sessionId, selector, query, text: String(text) }));
     return res.json(success("type", data));
   } catch (error) {
-    return res.status(500).json(failure("type", error));
+    const status = error.message.includes("not found") || error.message.includes("Unable to resolve") ? 400 : 500;
+    return res.status(status).json(failure("type", error));
   }
 });
 
@@ -335,7 +337,8 @@ router.post("/fill_form", async (req, res) => {
     const data = await runAgentAction("fill_form", () => browserService.fillForm({ sessionId, fields }));
     return res.json(success("fill_form", data));
   } catch (error) {
-    return res.status(500).json(failure("fill_form", error));
+    const status = error.message.includes("not found") || error.message.includes("Unable to resolve") ? 400 : 500;
+    return res.status(status).json(failure("fill_form", error));
   }
 });
 

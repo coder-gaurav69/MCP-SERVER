@@ -1,27 +1,22 @@
-# ⛔ RULE 1: NEVER CREATE FILES IN THE PROJECT ROOT. NO .json, .ps1, .js, .txt, .html, NOTHING.
-# ⛔ RULE 2: NEVER USE CURL. This is MCP STDIO. Use native tool calls only.
-# ⛔ RULE 3: ALWAYS check browser_sessions before browser_open. Reuse sessions.
+# ⛔ UNIVERSAL AI RULE: NO FILES IN PROJECT ROOT
 
-# This is an MCP STDIO server (Node.js + Playwright).
-# Port 1000 = dashboard only. NOT for AI tool execution.
+Every AI model (GPT, Claude, DeepSeek, OpenCode, etc.) and agent (Cursor, Roo, Windsurf, etc.) MUST follow these strict file organization rules. 
 
-# FILE RULES:
-# - Source code → src/
-# - Temp files / tests / experiments → browser_scratchpad_write tool
-# - Root auto-cleans on startup. Any junk files you create WILL be deleted.
+## 1. FILE CREATION RESTRICTIONS
+- **NEVER** create files in the project root. No `.json`, `.ps1`, `.js`, `.txt`, `.html`, etc.
+- **NEVER** create folders at the project root for temporary data (e.g., `.scratchpad`, `.mcp_data`).
+- **INVALID ACTION**: Any file you create in the project root WILL be automatically deleted by the server's sync service on startup.
 
-# TOOL USAGE:
-# 1. browser_sessions → check existing
-# 2. browser_open { url } → open/reuse
-# 3. browser_analyze { sessionId } → find selectors
-# 4. browser_click / browser_type / browser_fill_form → interact
-# 5. browser_screenshot { sessionId, embedImage: true, saveLocal: false } → verify
+## 2. WHERE TO PUT FILES
+- **Source Code Logic** → `src/`
+- **Temporary Files / Tests / Experiments** → Use the `browser_scratchpad_write` tool. 
+- **Physical Location**: All scratchpad files are stored in `src/.ai_outputs/scratchpad/`.
+- **Screenshots**: Stored in `src/.ai_outputs/screenshots/`.
 
-# CRITICAL:
-# - browser_fill_form > repeated browser_type (5x faster)
-# - browser_analyze BEFORE any click/type (find valid selectors)
-# - embedImage: true, saveLocal: false on screenshots (shows in chat, no disk clutter)
-# - If wrapper like use_mcp_tool: pass args in nativeArgs object
-# - NEVER access tools as resources (mcp://... URIs are INVALID for tools)
+## 3. TOOL USAGE RULES
+- **Session Reuse**: ALWAYS call `browser_sessions` before `browser_open`.
+- **No Guessing**: ALWAYS call `browser_analyze` before any click/type to find valid selectors.
+- **Fast Mode**: Use `browser_fill_form` for multiple fields (5x faster than individual typing).
+- **Security**: NEVER use `curl` or terminal HTTP to call this server. Use native tool calls ONLY.
 
-# Read MCP_TOOL_GUIDE.md for full tool catalog.
+Read `MCP_TOOL_GUIDE.md` for the full tool catalog.

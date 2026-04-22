@@ -53,6 +53,14 @@ export function createApp() {
     const normalized = { ...rawArgs };
     for (const [key, field] of Object.entries(shape || {})) {
       if (!(key in normalized)) continue;
+      
+      // Handle stringified JSON from query parameters (GET requests) or raw strings that should be numbers/bools
+      if (typeof normalized[key] === "string" && (normalized[key].startsWith("{") || normalized[key].startsWith("["))) {
+        try {
+          normalized[key] = JSON.parse(normalized[key]);
+        } catch (e) { /* ignore and use raw string */ }
+      }
+
       const fieldType = unwrapOptional(field);
       if (fieldType instanceof z.ZodBoolean) {
         normalized[key] = toBooleanLike(normalized[key]);
@@ -321,7 +329,7 @@ export function createApp() {
         version: "3.5.0",
         integrations: {
           mcp_sse: `${baseUrl}/mcp/sse`,
-          mcp_stdio: "node mcp-server.js",
+          mcp_stdio: "npm run mcp",
           rest_api: `${baseUrl}/api/tools`,
           discovery: {
             openai: `${baseUrl}/api/tools/definitions/openai`,
@@ -340,9 +348,16 @@ export function createApp() {
   app.get("/llms.txt", async (req, res) => {
     registerAllTools();
     let output = "# Browser Automation Universal Server\n\n";
-    output += "⚠️ VERY IMPORTANT INSTRUCTION FOR AI AGENTS ⚠️\n";
-    output += "If you are an agent connected via MCP (e.g., Roo Code, Cursor), DO NOT use `curl` or terminal commands to interact with this server! You MUST use the native MCP Tool Call functions available to you (e.g., call `browser_open` directly through your tool calling interface).\n\n";
-    output += "This server provides a REST API as a fallback for non-MCP agents: http://localhost:1000/api/tools/{tool_name}\n\n";
+    output += "⚠️ VERY IMPORTANT INSTRUCTIONS FOR AI AGENTS ⚠️\n";
+    output += "1. **NO CURL**: Use your native MCP Tool Call functions. DO NOT use `curl` or PowerShell terminal commands.\n";
+    output += "2. **SMART FORM FILLING**: To fill a form, follow this blueprint:\n";
+    output += "   a. Call `browser_analyze` first.\n";
+    output += "   b. Look for the `forms` object in the response.\n";
+    output += "   c. COPY the keys from `suggestedPayload` exactly as they appear.\n";
+    output += "   d. Use `browser_fill_form` with `turbo: true` and those exact keys.\n";
+    output += "3. **LEAN DATA**: Use `browser_screenshot` with `embedImage: false` + `analyze: true` for AI visual descriptions.\n\n";
+    
+    output += "This server provides a REST API as a fallback: http://localhost:1000/api/tools/{tool_name}\n\n";
     output += "## Most Used Tools (Bootstrap)\n\n";
     
     const bootstrap = ['browser_open', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_analyze', 'browser_sessions'];
@@ -351,8 +366,8 @@ export function createApp() {
       if (tool) output += `- **${tool.name}**: ${tool.description}\n`;
     }
     
-    output += "\n## Full API\nFor a full tool list and documentation, visit http://localhost:1000/llms-full.txt\n";
-    output += "Fetch specific tool schemas: http://localhost:1000/api/tools/{name}/schema\n";
+    output += "\n## Full Documentation\nRead the detailed guide: http://localhost:1000/mcp/tool-guide\n";
+    output += "Tool definitions: http://localhost:1000/api/tools/definitions/mcp\n";
     
     res.setHeader("Content-Type", "text/plain");
     res.send(output);
@@ -389,13 +404,151 @@ export function createApp() {
     res.send(output);
   });
 
-  app.get("/health", (_req, res) => {
-    res.json({
-      status: "success",
-      action: "health",
-      data: { ok: true },
-      error: ""
-    });
+  app.get("/health", async (_req, res) => {
+    try {
+      const { queueService } = await import("./services/queueService.js");
+      const { workerService } = await import("./services/workerService.js");
+      const { sessionStore } = await import("./services/sessionStore.js");
+      const { wsService } = await import("./services/wsService.js");
+      const { selfHealingSelector } = await import("./services/selfHealingSelector.js");
+      const { aiDecisionService } = await import("./services/aiDecisionService.js");
+
+      res.json({
+        status: "success",
+        action: "health",
+        data: {
+          ok: true,
+          version: "4.0.0",
+          uptime: process.uptime(),
+          services: {
+            redis: sessionStore.isRedisConnected,
+            queue: queueService.isReady,
+            worker: workerService.getStats().running,
+            websocket: wsService.getStats(),
+            aiDecision: aiDecisionService.isAvailable(),
+            selfHealing: config.selfHealingEnabled
+          }
+        },
+        error: ""
+      });
+    } catch (error) {
+      res.json({
+        status: "success",
+        action: "health",
+        data: { ok: true },
+        error: ""
+      });
+    }
+  });
+
+  // ─── Queue Management REST API ───────────────────────────
+  app.post("/api/queue/enqueue", async (req, res) => {
+    try {
+      const { queueService } = await import("./services/queueService.js");
+      if (!queueService.isReady) {
+        return res.status(503).json(failure("queue", "Queue not available. Set REDIS_URL in .env."));
+      }
+      const { action, params, priority } = req.body || {};
+      if (!action) return res.status(400).json(failure("queue", "Missing required field: action"));
+      const result = await queueService.enqueue(action, params || {}, { priority });
+      res.json(success("queue_enqueue", result));
+    } catch (error) {
+      res.status(500).json(failure("queue", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/api/queue/status", async (_req, res) => {
+    try {
+      const { queueService } = await import("./services/queueService.js");
+      const metrics = await queueService.getMetrics();
+      res.json(success("queue_status", metrics));
+    } catch (error) {
+      res.status(500).json(failure("queue", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/api/queue/jobs", async (req, res) => {
+    try {
+      const { queueService } = await import("./services/queueService.js");
+      const status = req.query.status || "all";
+      const limit = Number(req.query.limit || 20);
+      const result = await queueService.listJobs({ status, limit });
+      res.json(success("queue_jobs", result));
+    } catch (error) {
+      res.status(500).json(failure("queue", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/api/queue/job/:jobId", async (req, res) => {
+    try {
+      const { queueService } = await import("./services/queueService.js");
+      const result = await queueService.getJobStatus(req.params.jobId);
+      res.json(success("job_status", result));
+    } catch (error) {
+      res.status(500).json(failure("queue", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  // ─── System Status REST API ──────────────────────────────
+  app.get("/api/system/status", async (_req, res) => {
+    try {
+      const { queueService } = await import("./services/queueService.js");
+      const { workerService } = await import("./services/workerService.js");
+      const { sessionStore } = await import("./services/sessionStore.js");
+      const { wsService } = await import("./services/wsService.js");
+      const { selfHealingSelector } = await import("./services/selfHealingSelector.js");
+      const { aiDecisionService } = await import("./services/aiDecisionService.js");
+      const { browserService } = await import("./services/browserService.js");
+
+      res.json(success("system_status", {
+        queue: await queueService.getMetrics(),
+        worker: workerService.getStats(),
+        websocket: wsService.getStats(),
+        redis: sessionStore.isRedisConnected,
+        healing: selfHealingSelector.getStats(),
+        aiDecision: aiDecisionService.isAvailable(),
+        sessions: browserService.getSessions()?.length || 0
+      }));
+    } catch (error) {
+      res.status(500).json(failure("system", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  // ─── Self-Healing Stats REST API ─────────────────────────
+  app.get("/api/healing/stats", async (_req, res) => {
+    try {
+      const { selfHealingSelector } = await import("./services/selfHealingSelector.js");
+      res.json(success("healing_stats", {
+        stats: selfHealingSelector.getStats(),
+        recentLog: selfHealingSelector.getHealingLog().slice(-20)
+      }));
+    } catch (error) {
+      res.status(500).json(failure("healing", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  // ─── AI Decision REST API ────────────────────────────────
+  app.post("/api/ai/plan", async (req, res) => {
+    try {
+      const { aiDecisionService } = await import("./services/aiDecisionService.js");
+      const { goal, sessionId } = req.body || {};
+      if (!goal) return res.status(400).json(failure("ai_plan", "Missing required field: goal"));
+
+      let context = {};
+      if (sessionId) {
+        const { browserService } = await import("./services/browserService.js");
+        const session = browserService.getSession(sessionId);
+        if (session) {
+          const state = await browserService.analyzePageState(session);
+          context = { url: state.url, pageTitle: state.title, interactiveElements: state.elements };
+        }
+      }
+
+      const plan = await aiDecisionService.planFromGoal(goal, context);
+      res.json(success("ai_plan", plan));
+    } catch (error) {
+      res.status(500).json(failure("ai_plan", error instanceof Error ? error.message : String(error)));
+    }
   });
 
   app.get("/api/sync/status", async (_req, res) => {

@@ -1,4 +1,5 @@
 import "dotenv/config";
+import path from "node:path";
 
 const toBoolean = (value, fallback = true) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -26,10 +27,11 @@ export const config = {
   // Typical values: 1, 0.9, 0.8, 1.25, 1.5
   // NOTE: keep empty by default; only use if explicitly set (mostly useful for headless consistency).
   browserScaleFactor: process.env.BROWSER_SCALE_FACTOR ? Number(process.env.BROWSER_SCALE_FACTOR) : null,
-  screenshotDir: process.env.SCREENSHOT_DIR || ".mcp_data/screenshots",
+  screenshotDir: process.env.SCREENSHOT_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "screenshots"),
   /** When true, screenshots are stored under screenshots/<sessionId>/ and removed entirely on cleanup. */
   sessionScreenshotSubdirs: toBoolean(process.env.SESSION_SCREENSHOT_SUBDIRS, true),
-  downloadsDir: process.env.DOWNLOADS_DIR || ".mcp_data/downloads",
+  downloadsDir: process.env.DOWNLOADS_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "downloads"),
+  userDataDir: process.env.USER_DATA_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "user_data"),
   autoCleanup: toBoolean(process.env.AUTO_CLEANUP, false),
   defaultViewport: {
     width: Number(process.env.VIEWPORT_WIDTH || 1920),
@@ -50,9 +52,24 @@ export const config = {
   figmaApiBaseUrl: process.env.FIGMA_API_BASE_URL || "https://api.figma.com/v1",
 
   // ─── Agent Scratchpad ────────────────────────────────────
-  scratchpadDir: process.env.SCRATCHPAD_DIR || ".mcp_data/scratchpad",
+  scratchpadDir: process.env.SCRATCHPAD_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "scratchpad"),
 
   // ─── Session Persistence ─────────────────────────────────
   /** When true, browser_open will reuse an existing session for the same domain instead of creating a new one. */
-  sessionReuse: toBoolean(process.env.SESSION_REUSE, true)
+  sessionReuse: toBoolean(process.env.SESSION_REUSE, true),
+
+  // ─── Redis + Queue ──────────────────────────────────────
+  /** Redis connection URL. Leave empty to use in-memory fallback. */
+  redisUrl: process.env.REDIS_URL || "",
+  /** Number of concurrent jobs the worker can process. */
+  workerConcurrency: Number(process.env.WORKER_CONCURRENCY || 2),
+
+  // ─── Logging ────────────────────────────────────────────
+  logsDir: process.env.LOGS_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "logs"),
+
+  // ─── AI Decision Layer ──────────────────────────────────
+  /** Enable AI-powered self-healing selectors and NL→automation planning. */
+  aiDecisionEnabled: toBoolean(process.env.AI_DECISION_ENABLED, true),
+  /** Enable self-healing selectors (DOM heuristic + AI fallback). */
+  selfHealingEnabled: toBoolean(process.env.SELF_HEALING_ENABLED, true)
 };

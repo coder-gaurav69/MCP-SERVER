@@ -1,40 +1,21 @@
-# ⛔ RULE 1: NEVER CREATE FILES IN THE PROJECT ROOT. NO .json, .ps1, .js, .txt, .html, NOTHING.
-# ⛔ RULE 2: NEVER USE CURL OR TERMINAL HTTP TO CALL THIS SERVER. USE NATIVE MCP TOOL CALLS ONLY.
-# ⛔ RULE 3: ALWAYS CALL browser_sessions BEFORE browser_open. REUSE EXISTING SESSIONS.
+# ⛔ UNIVERSAL AI RULE: NO FILES IN PROJECT ROOT
 
-# ───────────────────────────────────────────────────────────
-# This is an MCP STDIO server (Playwright browser automation).
-# Transport: JSON-RPC over STDIN/STDOUT.
-# Port 1000 is the dashboard ONLY — NOT for AI tool execution.
-# ───────────────────────────────────────────────────────────
+This rule applies to ALL AI models (GPT, Claude, DeepSeek, OpenCode, etc.) and agents (Cursor, Roo, Windsurf, etc.).
 
-# WHERE TO PUT FILES:
-# - Source code/logic → src/
-# - Temp files, tests, drafts, HTML experiments → use browser_scratchpad_write tool
-# - NEVER create files in root. The server auto-deletes root clutter on startup.
+## 1. STRICT ROOT ISOLATION
+- **NEVER** create files directly in the project root.
+- **NEVER** create temporary data folders (like `.scratchpad`) at the root.
+- **ENFORCEMENT**: The server auto-deletes any unauthorized files in the root on startup.
 
-# HOW TO USE BROWSER TOOLS:
-# 1. Call browser_sessions → check for existing sessions
-# 2. Call browser_open { url: "..." } → opens browser (reuses session if same domain)
-# 3. Call browser_analyze { sessionId: "..." } → find valid selectors
-# 4. Call browser_click / browser_type / browser_fill_form → interact
-# 5. Call browser_screenshot { sessionId: "..." } → verify visually
+## 2. DIRECTORY STRUCTURE
+- **Permanent Logic** → `src/`
+- **Temporary Output** → ALWAYS use `browser_scratchpad_write`.
+- **System Storage**: All generated artifacts go to `src/.ai_outputs/`.
 
-# KEY TOOL RULES:
-# - Use browser_fill_form for multiple fields (5x faster than repeated browser_type)
-# - Use browser_analyze BEFORE clicking/typing to discover valid selectors
-# - Use browser_scratchpad_write for ALL temporary files
-# - Set embedImage: true, saveLocal: false on screenshots
-# - Use settlePolicy: "strict" if page loads slowly
+## 3. CORE PROTOCOLS
+- **Native Tools**: Use native MCP tool calls only. NO `curl`.
+- **Session ID**: Reuse sessions via `browser_sessions` check.
+- **Pre-Analysis**: Call `browser_analyze` BEFORE clicking or typing to ensure selector accuracy.
+- **Verification**: Take `browser_screenshot` after every change to verify state.
 
-# CALLING CONVENTION:
-# If your client uses use_mcp_tool wrapper, pass args inside nativeArgs:
-#   { "server_name": "browser-automation", "tool_name": "browser_open", "nativeArgs": { "url": "..." } }
-
-# AUTONOMY:
-# - Do NOT ask permission for individual steps. Execute the goal.
-# - If a selector fails, use browser_analyze to discover alternatives. Retry 3x before asking.
-# - Take browser_screenshot after every change to verify.
-# - Reuse sessions. Never open duplicate browser windows.
-
-# Read MCP_TOOL_GUIDE.md for the full tool catalog if needed.
+Refer to `MCP_TOOL_GUIDE.md` for detailed tool schemas.

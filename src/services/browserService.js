@@ -5,6 +5,18 @@ import { v4 as uuidv4 } from "uuid";
 import { config } from "../config.js";
 import { agentActivityService } from "./agentActivityService.js";
 import { visionService } from "./visionService.js";
+import { moveMouseHumanoid, typeHumanoid } from "../utils/humanoid.js";
+import { selfHealingSelector } from "./selfHealingSelector.js";
+import { sessionStore } from "./sessionStore.js";
+import { createServiceLogger, logAction as logStructuredAction } from "./loggerService.js";
+
+const svcLog = createServiceLogger("browser-service");
+
+/** @type {import('./wsService.js').WsService|null} */
+let _wsService = null;
+
+/** Allow mcpServer boot to inject the WS instance after construction. */
+export function setBrowserServiceWs(ws) { _wsService = ws; }
 
 /** Kebab-case names for `getComputedStyle(...).getPropertyValue(...)` (clone / codegen helpers). */
 const COMPUTED_STYLE_PROPERTY_KEYS = [
@@ -124,10 +136,18 @@ class BrowserService {
   }
 
   /** Find an existing session on the same origin. Returns session or null. */
-  findSessionByDomain(url) {
+  async findSessionByDomain(url) {
     if (!url || !config.sessionReuse) return null;
     try {
       const targetOrigin = new URL(url).origin;
+
+      // 1. Try Redis store first (Cross-process persistence)
+      const redisMatch = await sessionStore.findByDomain(targetOrigin);
+      if (redisMatch && this.sessions.has(redisMatch.id)) {
+        return this.sessions.get(redisMatch.id);
+      }
+
+      // 2. Local fallback
       for (const [, session] of this.sessions) {
         try {
           const sessionOrigin = new URL(session.page.url()).origin;
@@ -139,31 +159,51 @@ class BrowserService {
   }
 
   async getOrCreateSession(sessionId, options = {}) {
+    // If a REAL sessionId is passed that we already know about...
     if (sessionId && this.sessions.has(sessionId)) {
-      return this.sessions.get(sessionId);
+      const session = this.sessions.get(sessionId);
+      // ...check if it's still "alive". If not, PURGE it so we can recreate it.
+      if (!this.isSessionAlive(session)) {
+        console.error(`[SESSION] Purging dead session ${sessionId} before recreation.`);
+        await this.closeSession({ sessionId, cleanup: false }).catch(() => { });
+      } else {
+        return session;
+      }
     }
 
-    // Smart session reuse: prefer existing session if any exists
-    if (!sessionId && config.sessionReuse) {
+    // Treat these strings as "give me whatever is best" rather than literal IDs
+    const isPlaceholderId = ["new", "fresh", "auto", "any", "current", "latest"].includes(String(sessionId || "").toLowerCase());
+
+    // Smart session reuse: prefer existing session if any exists AND is alive
+    if ((!sessionId || isPlaceholderId) && config.sessionReuse) {
       if (options.url) {
-        const domainMatch = this.findSessionByDomain(options.url);
-        if (domainMatch) {
+        const domainMatch = await this.findSessionByDomain(options.url);
+        if (domainMatch && this.isSessionAlive(domainMatch)) {
           this.appendScratchpad(domainMatch, `♻ Reusing domain match session ${domainMatch.id} for ${options.url}`);
           return domainMatch;
         }
       }
-      if (this.sessions.size > 0) {
-        const lastSession = Array.from(this.sessions.values()).pop();
-        this.appendScratchpad(lastSession, `♻ Reusing last active session ${lastSession.id} for ${options.url || "task"}`);
-        return lastSession;
+
+      const allSessions = Array.from(this.sessions.values());
+      for (let i = allSessions.length - 1; i >= 0; i--) {
+        const s = allSessions[i];
+        if (this.isSessionAlive(s)) {
+          this.appendScratchpad(s, `♻ Reusing active live session ${s.id}`);
+          return s;
+        } else {
+          // Cleanup dead session found during search
+          this.sessions.delete(s.id);
+          await sessionStore.remove(s.id);
+        }
       }
     }
+    // ... (rest of getOrCreateSession logic for creating a new session follows)
 
-    const effectiveSessionId = sessionId || uuidv4();
+    const effectiveSessionId = (sessionId && !isPlaceholderId) ? sessionId : uuidv4();
     const headless =
       typeof options.headless === "boolean" ? options.headless : config.defaultHeadless;
     const persist = options.persist ?? false;
-    const userDataDir = persist ? path.resolve(".mcp_data", "user_data", effectiveSessionId) : null;
+    const userDataDir = persist ? path.resolve(config.userDataDir, effectiveSessionId) : null;
 
     // Standard resolutions
     const width = config.defaultViewport.width;
@@ -345,13 +385,50 @@ class BrowserService {
     return session;
   }
 
+  isSessionAlive(session) {
+    if (!session || !session.page || !session.context) return false;
+
+    // Check if the page is closed
+    if (session.page.isClosed()) return false;
+
+    // For non-persistent contexts, check if the browser is still connected
+    if (session.browser && !session.browser.isConnected()) return false;
+
+    return true;
+  }
+
   getSession(sessionId) {
-    if (!sessionId || !this.sessions.has(sessionId)) return null;
-    return this.sessions.get(sessionId);
+    if (!sessionId) return null;
+
+    // Support placeholder IDs for convenience in tools/CLI
+    const isPlaceholder = ["auto", "any", "current", "latest"].includes(String(sessionId).toLowerCase());
+    if (isPlaceholder && this.sessions.size > 0) {
+      // Find the most recently active LIVE session
+      const allSessions = Array.from(this.sessions.values());
+      for (let i = allSessions.length - 1; i >= 0; i--) {
+        const s = allSessions[i];
+        if (this.isSessionAlive(s)) return s;
+        // Optimization: purge dead sessions found during search
+        this.sessions.delete(s.id);
+      }
+      return null;
+    }
+
+    if (!this.sessions.has(sessionId)) return null;
+    const session = this.sessions.get(sessionId);
+
+    // Anti-frustration: if specific session is dead, purge it now so user can recreate
+    if (!this.isSessionAlive(session)) {
+      this.sessions.delete(sessionId);
+      return null;
+    }
+
+    return session;
   }
 
   logAction(session, { action, selector = "", result = "success", retryCount = 0, metadata = {} }) {
     const entry = {
+      sessionId: session.id,
       timestamp: new Date().toISOString(),
       action,
       selector,
@@ -362,6 +439,10 @@ class BrowserService {
     session.logs.push(entry);
     session.lastAction = entry;
     session.currentUrl = session.page.url();
+
+    // Real-time broadcast
+    if (_wsService) _wsService.actionLog(entry);
+    logStructuredAction(entry);
   }
 
   appendScratchpad(session, note) {
@@ -384,7 +465,7 @@ class BrowserService {
   normalizeQuery(text = "") {
     return String(text)
       .toLowerCase()
-      .replace(/[^\w\s-]/g, " ")
+      .replace(/[^\w\s\-[\]]/g, " ") // Preserve brackets
       .replace(/\s+/g, " ")
       .trim();
   }
@@ -477,16 +558,44 @@ class BrowserService {
             /* ── Ghost cursor ── */
             #mcp-ghost-cursor {
               position: fixed;
-              width: 16px; height: 16px;
-              background: linear-gradient(135deg, #818cf8, #a78bfa);
-              border: 2px solid rgba(255,255,255,0.9);
+              width: 22px; height: 22px;
+              background: radial-gradient(circle, rgba(129, 140, 248, 0.8) 0%, rgba(167, 139, 250, 0.4) 100%);
+              border: 1px solid rgba(255,255,255,0.8);
               border-radius: 50%;
               pointer-events: none;
               z-index: 2147483647;
               transform: translate(-50%, -50%);
-              transition: left 0.12s cubic-bezier(0.2,0,0,1), top 0.12s cubic-bezier(0.2,0,0,1), opacity 0.3s ease;
-              box-shadow: 0 2px 10px rgba(99,102,241,0.6), 0 0 0 5px rgba(99,102,241,0.15);
+              transition: left 0.1s linear, top 0.1s linear, opacity 0.3s ease;
+              box-shadow: 
+                0 0 15px rgba(99,102,241,0.6),
+                0 0 30px rgba(99,102,241,0.2),
+                inset 0 0 8px rgba(255,255,255,0.5);
               opacity: 0;
+            }
+            #mcp-ghost-cursor::after {
+              content: '';
+              position: absolute;
+              top: 50%; left: 50%;
+              width: 6px; height: 6px;
+              background: #fff;
+              border-radius: 50%;
+              transform: translate(-50%, -50%);
+              box-shadow: 0 0 10px #fff;
+            }
+            /* Trail effect */
+            .mcp-cursor-trail {
+              position: fixed;
+              width: 8px; height: 8px;
+              background: rgba(167, 139, 250, 0.4);
+              border-radius: 50%;
+              pointer-events: none;
+              z-index: 2147483646;
+              transform: translate(-50%, -50%);
+              animation: mcp-trail-fade 0.5s ease-out forwards;
+            }
+            @keyframes mcp-trail-fade {
+              0% { opacity: 0.6; transform: translate(-50%, -50%) scale(1); }
+              100% { opacity: 0; transform: translate(-50%, -50%) scale(0.2); }
             }
           `;
           document.head.appendChild(style);
@@ -498,7 +607,7 @@ class BrowserService {
             position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
             z-index: 2147483645;
             display: ${window.__mcpAgentActive ? 'block' : 'none'};
-            pointer-events: all; cursor: not-allowed;
+            pointer-events: none;
             transition: opacity 0.45s cubic-bezier(0.4,0,0.2,1);
             opacity: ${window.__mcpAgentActive ? '1' : '0'};
             user-select: none;
@@ -678,6 +787,18 @@ class BrowserService {
           window.__mcpAgentActive = active;
           const overlay = document.getElementById('__mcpAgentOverlay');
           const cursor = document.getElementById('mcp-ghost-cursor');
+
+          // Apply document-level locking for the real user
+          if (active) {
+            document.documentElement.style.cursor = 'not-allowed';
+            document.documentElement.style.userSelect = 'none';
+            document.documentElement.style.overflow = 'hidden';
+          } else {
+            document.documentElement.style.cursor = '';
+            document.documentElement.style.userSelect = '';
+            document.documentElement.style.overflow = '';
+          }
+
           if (overlay) {
             if (active) {
               overlay.style.display = 'block';
@@ -696,6 +817,14 @@ class BrowserService {
           if (cursor) {
             cursor.style.left = `${x}px`;
             cursor.style.top = `${y}px`;
+
+            // Add trail
+            const trail = document.createElement('div');
+            trail.className = 'mcp-cursor-trail';
+            trail.style.left = `${x}px`;
+            trail.style.top = `${y}px`;
+            document.documentElement.appendChild(trail);
+            setTimeout(() => trail.remove(), 500);
           }
         };
 
@@ -709,11 +838,11 @@ class BrowserService {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
-            
+
             // Visual feedback
             const border = document.getElementById('__mcpAgentPulseBorder');
             const pill = document.getElementById('__mcpAgentPill');
-            
+
             if (pill) {
               pill.classList.remove('mcp-shake-small');
               void pill.offsetWidth;
@@ -737,7 +866,7 @@ class BrowserService {
         } else {
           setupUI();
         }
-        
+
         // Ensure UI stays on top
         const observer = new MutationObserver(() => {
           const overlay = document.getElementById('__mcpAgentOverlay');
@@ -804,46 +933,30 @@ class BrowserService {
 
   async moveMouseNatural(session, { x, y }) {
     const from = session.lastMousePos || { x: 0, y: 0 };
-    const distance = Math.sqrt(Math.pow(x - from.x, 2) + Math.pow(y - from.y, 2));
 
-    if (distance < 5) return;
-
-    const steps = Math.min(Math.max(Math.floor(distance / 15), 5), 20);
-
-    // Simple quadratic Bezier control point for a slight curve
-    const control = {
-      x: (from.x + x) / 2 + (Math.random() - 0.5) * distance * 0.3,
-      y: (from.y + y) / 2 + (Math.random() - 0.5) * distance * 0.3
-    };
-
-    const getBezier = (t, p0, p1, p2) => (1 - t) * (1 - t) * p0 + 2 * (1 - t) * t * p1 + t * t * p2;
-
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const curX = getBezier(t, from.x, control.x, x);
-      const curY = getBezier(t, from.y, control.y, y);
-      await session.page.mouse.move(curX, curY);
-      
-      // Update visual ghost cursor
-      try {
+    await moveMouseHumanoid(
+      session.page,
+      from,
+      { x, y },
+      async (curX, curY) => {
         await session.page.evaluate(({ x, y }) => {
           if (window.__mcpUpdateGhostCursor) window.__mcpUpdateGhostCursor(x, y);
         }, { x: curX, y: curY });
-      } catch { /* page navigated */ }
-
-      if (i % 2 === 0) await new Promise(r => setTimeout(r, 5)); // Micro-jitter
-    }
+      }
+    );
 
     session.lastMousePos = { x, y };
   }
 
   async waitForSettle(session, policy = "normal") {
-    const timeout = policy === "lazy" ? 100 : policy === "strict" ? 2000 : 800;
-    
+    const timeout = policy === "lazy" ? 50 : policy === "strict" ? 2000 : 500;
+
     // Domain-specific cold start protection
     const url = session.page.url();
     const isSlowDomain = url.includes("onrender.com") || url.includes("vercel.app") || url.includes("render.com");
-    const effectiveTimeout = isSlowDomain ? Math.max(timeout, 3000) : timeout;
+    // OnRender is slow to wake up, but once it starts, we don't need a huge wait per action.
+    // We only force a long wait if the page title suggests it's still "loading/waking up".
+    const effectiveTimeout = timeout;
 
     if (config.turboMode && policy !== "strict" && !isSlowDomain) {
       try {
@@ -853,11 +966,17 @@ class BrowserService {
       return;
     }
 
+    /**
+     * Intelligent wait for page stability.
+     * 1. Waits for initial load.
+     * 2. Waits for network idle.
+     * 3. Uses MutationObserver to ensure the DOM has stopped shifting for at least 500ms.
+     */
     try {
       await session.page.waitForLoadState("load", { timeout: 10000 }).catch(() => { });
       await session.page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => { });
-      
-      // Stabilization: Wait for DOM mutations to stabilize
+
+      // Stabilization: Wait for DOM mutations to stabilize (no changes for 500ms)
       await session.page.waitForFunction(() => {
         return new Promise((resolve) => {
           let lastMutation = Date.now();
@@ -865,7 +984,7 @@ class BrowserService {
             lastMutation = Date.now();
           });
           observer.observe(document.body, { childList: true, subtree: true, attributes: true });
-          
+
           const check = setInterval(() => {
             if (Date.now() - lastMutation > 500) {
               clearInterval(check);
@@ -873,14 +992,14 @@ class BrowserService {
               resolve(true);
             }
           }, 100);
-          
+
           setTimeout(() => {
             clearInterval(check);
             observer.disconnect();
             resolve(true);
           }, 5000); // Max stabilization wait
         });
-      }, { timeout: 6000 }).catch(() => {});
+      }, { timeout: 6000 }).catch(() => { });
 
       await new Promise(r => setTimeout(r, effectiveTimeout));
     } catch { /* ignore */ }
@@ -959,9 +1078,22 @@ class BrowserService {
       candidates.push({ strategy: "data-testid", selector: `[data-testid='${primary}']`, type: "css" });
     }
 
+    // Special handling for bracketed names like data[0][item_name]
+    if (q.includes("[") && q.includes("]")) {
+      const cleanName = q.replace(/['"]/g, "");
+      candidates.push({ strategy: "exact-name", selector: `[name='${cleanName}']`, type: "css" });
+      // Also try escaping brackets if needed, though Playwright handles raw strings in [name='...'] well
+      const escaped = cleanName.replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+      candidates.push({ strategy: "escaped-name", selector: `[name='${escaped}']`, type: "css" });
+    }
+
     const textSelector = tokens.join(" ") || q;
     if (textSelector) {
-      candidates.push({ strategy: "text", selector: `text=${textSelector}`, type: "text" });
+      // 1. For non-interaction actions, or if action is not type/select, keep standard ordering
+      if (action !== "type" && action !== "upload" && action !== "select") {
+        candidates.push({ strategy: "text", selector: `text=${textSelector}`, type: "text" });
+      }
+
       candidates.push({ strategy: "placeholder", selector: `[placeholder*='${textSelector}']`, type: "css" });
       candidates.push({ strategy: "aria-label", selector: `[aria-label*='${textSelector}']`, type: "css" });
 
@@ -974,11 +1106,34 @@ class BrowserService {
       }
 
       if (action === "type" || action === "upload" || action === "select") {
+        const fuzzy = `translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ:','abcdefghijklmnopqrstuvwxyz  ')`;
         candidates.push({
           strategy: "label-input",
-          selector: `xpath=//label[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'${textSelector}')]/following::*[self::input or self::textarea or self::select][1]`,
+          selector: `xpath=//label[contains(${fuzzy},'${textSelector}')]/following::*[self::input or self::textarea or self::select][1]`,
           type: "xpath"
         });
+        candidates.push({
+          strategy: "near-text-input",
+          selector: `xpath=//*[contains(${fuzzy},'${textSelector}')]/following::*[self::input or self::textarea or self::select][1]`,
+          type: "xpath"
+        });
+        candidates.push({
+          strategy: "parent-input",
+          selector: `xpath=//*[contains(${fuzzy},'${textSelector}')]/parent::*//*[self::input or self::textarea or self::select][1]`,
+          type: "xpath"
+        });
+
+        // Table Column Header Strategy: Find input in a cell under a <th> containing the text
+        candidates.push({
+          strategy: "table-col-input",
+          selector: `xpath=//table//th[contains(${fuzzy},'${textSelector}')]/ancestor::table//tr//td[count(//table//th[contains(${fuzzy},'${textSelector}')]/preceding-sibling::th)+1]//*[self::input or self::textarea or self::select]`,
+          type: "xpath"
+        });
+      }
+
+      // Add standard text match as a lower-priority fallback for typing
+      if (action === "type" || action === "upload" || action === "select") {
+        candidates.push({ strategy: "text", selector: `text=${textSelector}`, type: "text" });
       }
 
       candidates.push({
@@ -997,8 +1152,21 @@ class BrowserService {
     return locator.first().isVisible();
   }
 
+  /**
+   * Resolves a natural language query or CSS selector to a stable Playwright locator.
+   * Uses a multi-layered strategy: 
+   * 1. Direct CSS match (highest priority)
+   * 2. Semantic matches (ID, name, data-testid)
+   * 3. Human-centric matches (labels, placeholders, aria-labels)
+   * 4. Positional/Relational matches (e.g. input near label)
+   */
   async resolveSelector(session, { selector, query, action }) {
     const page = session.page;
+
+    // Support typing/clicking with NO selector (current focus)
+    if (!selector && !query) {
+      return { strategy: "focus", selector: "focused" };
+    }
 
     // 1. Strictly prioritize the direct selector if provided
     if (selector) {
@@ -1011,6 +1179,11 @@ class BrowserService {
     }
 
     const candidates = this.buildSelectorCandidates({ selector, query, action });
+    if (candidates.length === 0) {
+      // Fallback for query-only if candidates failed but we have a query
+      if (query) return { selector: `text=${query}`, strategy: "fallback-text" };
+      return { strategy: "focus", selector: "focused" };
+    }
 
     if (config.turboMode) {
       const resolutionPromises = candidates.map(async (candidate) => {
@@ -1029,9 +1202,9 @@ class BrowserService {
       } catch {
         // Fallback to query-only if candidates failed
         if (query) {
-           try {
-             return { selector: `text=${query}`, strategy: "fallback-text" };
-           } catch { /* ignore */ }
+          try {
+            return { selector: `text=${query}`, strategy: "fallback-text" };
+          } catch { /* ignore */ }
         }
         throw new Error(`Unable to resolve selector for: "${query || selector}". AI TIP: Try calling 'browser_analyze' first to see available interactive elements, or use 'browser_wait' if you think the page is still loading.`);
       }
@@ -1044,6 +1217,21 @@ class BrowserService {
           return { selector: candidate.selector, strategy: candidate.strategy };
         }
       } catch { /* ignore */ }
+    }
+
+    // ─── Self-Healing Fallback ──────────────────────────────
+    if (config.selfHealingEnabled) {
+      const originalSelector = selector || `text=${query}`;
+      const healResult = await selfHealingSelector.heal(page, originalSelector, query, action);
+      if (healResult.healed) {
+        svcLog.info("Self-healing recovered selector", {
+          original: originalSelector,
+          healed: healResult.selector,
+          strategy: healResult.strategy
+        });
+        if (_wsService) _wsService.healingEvent(healResult);
+        return { selector: healResult.selector, strategy: `self-healed:${healResult.strategy}` };
+      }
     }
 
     throw new Error(`Unable to resolve selector for: "${query || selector}". AI TIP: Try calling 'browser_analyze' first to see available interactive elements, or use 'browser_wait' if you think the page is still loading.`);
@@ -1088,20 +1276,45 @@ class BrowserService {
         return el.tagName.toLowerCase();
       };
 
+      // 1. Label Mapping (id -> labelText)
+      const labelMap = {};
+      Array.from(document.querySelectorAll('label')).forEach(label => {
+        const forId = label.getAttribute('for');
+        if (forId) {
+          labelMap[forId] = (label.innerText || label.textContent || "").trim();
+        } else {
+          // Check for nested inputs
+          const input = label.querySelector('input, select, textarea');
+          if (input && input.id) labelMap[input.id] = (label.innerText || label.textContent || "").trim();
+        }
+      });
+
+      const forms = [];
       const interactive = Array.from(document.querySelectorAll("button, a, input, textarea, select, [role='button'], [onclick]"))
         .filter(isVisible)
-        .slice(0, 80) // Cap for token efficiency
+        .slice(0, 100) // Slightly larger cap
         .map((el) => {
           const tagName = el.tagName.toLowerCase();
+          const id = el.id;
+
+          // Determine the best "Human Label" for this field
+          let label = labelMap[id] || "";
+          if (!label) {
+            // Find closest parent label if any
+            const parentLabel = el.closest('label');
+            if (parentLabel) label = (parentLabel.innerText || parentLabel.textContent || "").trim();
+          }
+
           const info = {
             tag: tagName,
+            label: label || undefined,
             text: firstText(el),
             selector: selectorHint(el),
+            name: el.getAttribute("name") || undefined,
             type: el.getAttribute("type") || undefined,
             placeholder: el.getAttribute("placeholder") || undefined,
             aria: el.getAttribute("aria-label") || undefined,
             required: el.hasAttribute("required") || undefined,
-            disabled: el.disabled || undefined,
             value: (el.value !== undefined && tagName !== 'select') ? String(el.value).slice(0, 100) : undefined
           };
 
@@ -1113,11 +1326,65 @@ class BrowserService {
           return info;
         });
 
+      // 2. Form Grouping & Suggested Payload Generation
+      const formElements = Array.from(document.querySelectorAll('form')).map((formEl, index) => {
+        const inputs = Array.from(formEl.querySelectorAll('input, select, textarea'))
+          .filter(isVisible)
+          .filter(i => !['submit', 'button', 'reset', 'hidden'].includes(i.getAttribute('type')));
+
+        const suggestedPayload = {};
+        inputs.forEach(input => {
+          const bestKey = labelMap[input.id] || input.getAttribute('placeholder') || input.getAttribute('name') || input.id || "Unknown Field";
+          suggestedPayload[bestKey] = input.value || "value";
+        });
+
+        const submitButtons = Array.from(formEl.querySelectorAll('button, input[type="submit"]'))
+          .map(b => ({ text: firstText(b), selector: selectorHint(b) }));
+
+        return {
+          id: formEl.id || `form-${index}`,
+          action: formEl.getAttribute("action") || undefined,
+          fieldCount: inputs.length,
+          suggestedPayload,
+          submitButtons
+        };
+      });
+
       return {
         title: document.title,
         url: window.location.href,
         interactiveCount: interactive.length,
+        forms: formElements,
         elements: interactive
+      };
+    });
+  }
+
+  /**
+   * Advanced heuristic-based discovery of interactive elements.
+   * Useful for autonomous exploration and site mapping.
+   */
+  async discoverClickables(session) {
+    return session.page.evaluate(() => {
+      const isVisible = (el) => {
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0 && el.offsetHeight > 0;
+      };
+
+      const items = Array.from(document.querySelectorAll('a, button, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [onclick]'))
+        .filter(isVisible)
+        .map(el => ({
+          tag: el.tagName.toLowerCase(),
+          text: (el.innerText || el.textContent || "").trim().slice(0, 50),
+          role: el.getAttribute('role') || undefined,
+          id: el.id || undefined,
+          href: el.tagName === 'A' ? el.getAttribute('href') : undefined,
+          selector: el.id ? `#${el.id}` : el.getAttribute('name') ? `[name="${el.getAttribute('name')}"]` : undefined
+        }));
+
+      return {
+        count: items.length,
+        items: items.slice(0, 50) // Capped for AI readability
       };
     });
   }
@@ -1130,16 +1397,16 @@ class BrowserService {
         waitUntil: "load", // Changed from domcontentloaded for better initial reliability
         timeout: config.defaultTimeoutMs
       });
-      
+
       // Wait for the page to stop shifting (Stabilize)
       await this.waitForSettle(session, "strict");
       let title = await session.page.title();
-      
+
       const isColdStartProxy = (t) => {
         const lower = t.toLowerCase();
-        return lower.includes("application loading") || 
-               lower.includes("starting up") || 
-               lower.includes("waking up");
+        return lower.includes("application loading") ||
+          lower.includes("starting up") ||
+          lower.includes("waking up");
       };
 
       if (isColdStartProxy(title)) {
@@ -1152,8 +1419,8 @@ class BrowserService {
             },
             { timeout: 60000, polling: 2000 }
           );
-          
-          await session.page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(()=>{});
+
+          await session.page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => { });
           await this.waitForSettle(session);
           title = await session.page.title();
           this.appendScratchpad(session, `Application woke up. New title: "${title}"`);
@@ -1168,11 +1435,111 @@ class BrowserService {
       return {
         sessionId: session.id,
         url: session.page.url(),
-        title
+        title,
+        status: "success",
+        tip: "AI TIP: Run 'browser_analyze' next to see what you can interact with on this page."
       };
     } finally {
       await this.setAgentActive(session, false);
     }
+  }
+
+  async hover({ sessionId, selector, query }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    return this.withAgentLock(session, async () => {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "hover" });
+      const locator = session.page.locator(resolved.selector).first();
+      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+
+      const box = await locator.boundingBox();
+      if (box) {
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+        await this.moveMouseNatural(session, { x: centerX, y: centerY });
+
+        // Humanoid idle hover
+        const { hoverHumanoid } = await import("../utils/humanoid.js");
+        await hoverHumanoid(session.page, { x: centerX, y: centerY }, async (curX, curY) => {
+          await session.page.evaluate(({ x, y }) => {
+            if (window.__mcpUpdateGhostCursor) window.__mcpUpdateGhostCursor(x, y);
+          }, { x: curX, y: curY });
+        });
+      }
+
+      await locator.hover({ timeout: config.defaultTimeoutMs });
+      this.appendScratchpad(session, `Hovered: "${query || selector}"`);
+      return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy };
+    });
+  }
+
+  async smartScrape({ sessionId, query, maxItems = 20 }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    this.appendScratchpad(session, `🚀 God-level Smart Scrape initiated for: "${query || 'Current View'}"`);
+
+    return this.withAgentLock(session, async () => {
+      const data = await session.page.evaluate(({ query, maxItems }) => {
+        const results = [];
+
+        // Helper to find list containers
+        const findContainers = () => {
+          const all = document.querySelectorAll('div, section, ul, table, tbody');
+          return Array.from(all).filter(el => {
+            const children = Array.from(el.children);
+            if (children.length < 3) return false;
+
+            // Check if children look similar (tags or classes)
+            const tags = children.map(c => c.tagName);
+            const mostCommonTag = tags.sort((a, b) => tags.filter(v => v === a).length - tags.filter(v => v === b).length).pop();
+            const tagCount = tags.filter(t => t === mostCommonTag).length;
+
+            return tagCount / tags.length > 0.7;
+          });
+        };
+
+        const containers = findContainers();
+
+        // Pick the best container or use body
+        const container = containers[0] || document.body;
+        const items = Array.from(container.children).slice(0, maxItems);
+
+        items.forEach(item => {
+          const itemData = {};
+
+          // Extract text from common elements
+          const headings = item.querySelectorAll('h1, h2, h3, h4, h5, h6, .title, .name');
+          if (headings.length > 0) itemData.title = headings[0].innerText.trim();
+
+          const prices = item.querySelectorAll('.price, [class*="price"], [id*="price"]');
+          if (prices.length > 0) itemData.price = prices[0].innerText.trim();
+
+          const links = item.querySelectorAll('a');
+          if (links.length > 0) itemData.url = links[0].href;
+
+          const imgs = item.querySelectorAll('img');
+          if (imgs.length > 0) itemData.image = imgs[0].src;
+
+          // Generic fallback: all meaningful text
+          if (Object.keys(itemData).length === 0) {
+            itemData.text = item.innerText.trim().split('\n')[0].slice(0, 100);
+          }
+
+          results.push(itemData);
+        });
+
+        return {
+          title: document.title,
+          url: window.location.href,
+          itemCount: results.length,
+          items: results
+        };
+      }, { query, maxItems });
+
+      this.appendScratchpad(session, `✅ Scraped ${data.itemCount} items.`);
+      return data;
+    });
   }
 
   async click({ sessionId, selector, query }) {
@@ -1195,7 +1562,17 @@ class BrowserService {
         }
       }
 
-      await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
+      try {
+        await locator.click({ timeout: config.defaultTimeoutMs });
+      } catch (err) {
+        if (err.message.includes("intercepts pointer events") || err.message.includes("is not stable")) {
+          this.appendScratchpad(session, `  ⚠ Click intercepted, retrying with force:true...`);
+          await locator.click({ timeout: config.defaultTimeoutMs, force: true });
+        } else {
+          throw err;
+        }
+      }
+
       await this.waitForSettle(session);
       this.appendScratchpad(session, `Clicked: "${query || selector}" → ${resolved.strategy}`);
       this.logAction(session, { action: "click", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy } });
@@ -1215,8 +1592,15 @@ class BrowserService {
     return this.withAgentLock(session, async () => {
       const resolved = await this.resolveSelector(session, { selector, query, action: "type" });
 
+      // Handle focus-based typing
+      if (resolved.strategy === "focus") {
+        this.appendScratchpad(session, `Typing into focused element: "${String(text).slice(0, 20)}..."`);
+        await session.page.keyboard.type(String(text), { delay: config.turboMode ? 0 : 30 });
+        return { sessionId: session.id, strategy: "focus", typedLength: text.length };
+      }
+
       const locator = session.page.locator(resolved.selector).first();
-      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+      await locator.waitFor({ state: "visible", timeout: 8000 });
 
       // Check if readonly or disabled
       const isReady = await locator.evaluate(el => {
@@ -1241,14 +1625,21 @@ class BrowserService {
 
       await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
       await locator.fill("");
-      
+
       if (config.turboMode) {
         await locator.fill(String(text));
       } else {
-        await locator.pressSequentially(String(text), { delay: Math.floor(Math.random() * 40) + 20 });
+        await typeHumanoid(locator, String(text));
         await new Promise(r => setTimeout(r, 400));
       }
-      
+
+      // Force trigger events for dynamic UIs (React/Vue/etc)
+      await locator.evaluate(el => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      });
+
       await this.waitForSettle(session);
 
       this.appendScratchpad(session, `Typed into "${query || selector}": "${String(text).slice(0, 30)}..."`);
@@ -1264,27 +1655,60 @@ class BrowserService {
     });
   }
 
-  async fillForm({ sessionId, fields }) {
+  async fillForm({ sessionId, fields, turbo = null }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
     if (!fields || typeof fields !== "object") throw new Error("fields must be an object like { 'email field': 'test@example.com', ... }");
 
+    const isTurbo = turbo !== null ? this.toBoolean(turbo) : config.turboMode;
+
     await this.setAgentActive(session, true);
-    this.appendScratchpad(session, `Filling form with ${Object.keys(fields).length} fields`);
+    this.appendScratchpad(session, `Filling form with ${Object.keys(fields).length} fields (turbo=${isTurbo})`);
 
     const results = [];
-    for (const [query, value] of Object.entries(fields)) {
-      try {
-        const resolved = await this.resolveSelector(session, { query, action: "type" });
-        const locator = session.page.locator(resolved.selector).first();
-        await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+    const fieldEntries = Object.entries(fields);
 
-        const box = await locator.boundingBox();
-        if (box) {
-          const centerX = box.x + box.width / 2;
-          const centerY = box.y + box.height / 2;
-          await this.moveMouseNatural(session, { x: centerX, y: centerY });
-          await this.showRipple(session, centerX, centerY);
+    // 🚀 STEP 1: Batch Selector Resolution (The "Thinking" Phase)
+    // Resolve all selectors in parallel at the start to eliminate pauses between movements
+    this.appendScratchpad(session, `  ⏳ Resolving all fields...`);
+    const resolutionResults = await Promise.all(
+      fieldEntries.map(async ([query, value]) => {
+        try {
+          const resolved = await this.resolveSelector(session, { query, action: "type" });
+          return { query, value, resolved, error: null };
+        } catch (error) {
+          return { query, value, resolved: null, error: error.message };
+        }
+      })
+    );
+
+    // 🚀 STEP 2: Sequential Interaction (The "Action" Phase)
+    for (const { query, value, resolved, error } of resolutionResults) {
+      if (error) {
+        results.push({ field: query, status: "failed", error });
+        continue;
+      }
+
+      try {
+        const locator = session.page.locator(resolved.selector).first();
+
+        // Dynamic timeout based on mode
+        const waitTimeout = isTurbo ? 1000 : 3000;
+        await locator.waitFor({ state: "visible", timeout: waitTimeout });
+
+        // Ensure field is in view and ready for interaction
+        await locator.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => { });
+
+        // Visual feedback (Humanoid mode)
+        if (!isTurbo) {
+          const box = await locator.boundingBox();
+          if (box) {
+            const centerX = box.x + box.width / 2;
+            const centerY = box.y + box.height / 2;
+            // Slightly faster mouse for batch forms
+            await this.moveMouseNatural(session, { x: centerX, y: centerY });
+            await this.showRipple(session, centerX, centerY);
+          }
         }
 
         const tagName = await locator.evaluate(el => el.tagName.toLowerCase());
@@ -1300,41 +1724,55 @@ class BrowserService {
             await locator.selectOption({ value: match.value });
           } else if (options.length > 1) {
             await locator.selectOption({ index: 1 });
-            this.appendScratchpad(session, `  ⚠ "${query}": "${strVal}" not found in options, picked first available`);
           } else {
-            throw new Error(`No matching option for "${strVal}". Available: ${options.map(o => o.label).join(", ")}`);
+            throw new Error(`No matching option for "${strVal}"`);
           }
         } else if (inputType === "date") {
           await locator.fill(String(value));
         } else if (inputType === "checkbox" || inputType === "radio") {
           const checked = await locator.isChecked();
           const shouldCheck = ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
-          if (checked !== shouldCheck) await locator.click();
+          if (checked !== shouldCheck) await locator.click({ force: true });
         } else if (inputType === "file") {
           await locator.setInputFiles(String(value));
         } else {
-          await locator.click({ timeout: config.defaultTimeoutMs });
-          await this.waitForSettle(session, 100);
-          await locator.fill("");
-          if (config.turboMode) {
-            await locator.fill(String(value));
+          const isEditable = await locator.evaluate(el => !el.readOnly && !el.disabled);
+          if (isEditable) {
+            // Clear existing text first
+            await locator.fill("");
+
+            if (!isTurbo) {
+              // Human-like typing
+              await locator.click({ force: true }).catch(() => { });
+              await typeHumanoid(locator, String(value));
+              await new Promise(r => setTimeout(r, 150));
+            } else {
+              // Rapid fill
+              await locator.fill(String(value));
+            }
+
+            // Force trigger events
+            await locator.evaluate(el => {
+              ['input', 'change', 'blur'].forEach(ev => el.dispatchEvent(new Event(ev, { bubbles: true })));
+            });
+            this.appendScratchpad(session, `  ✓ ${query} = "${String(value).slice(0, 15)}..."`);
           } else {
-            await locator.pressSequentially(String(value), { delay: Math.floor(Math.random() * 50) + 60 });
-            await new Promise(r => setTimeout(r, 450)); // More visible typing for headed browser UX
+            this.appendScratchpad(session, `  ⚠ ${query} is read-only, skipped.`);
+            throw new Error(`Field is readonly or disabled`);
           }
         }
 
         results.push({ field: query, status: "filled", strategy: resolved.strategy });
-        this.appendScratchpad(session, `  ✓ ${query} = "${String(value).slice(0, 20)}"`);
-      } catch (error) {
-        results.push({ field: query, status: "failed", error: error.message });
-        this.appendScratchpad(session, `  ✗ ${query} → FAILED: ${error.message}`);
+      } catch (err) {
+        results.push({ field: query, status: "failed", error: err.message });
       }
     }
 
-    await this.setAgentActive(session, false);
-    this.logAction(session, { action: "fillForm", result: "success", metadata: { fieldCount: Object.keys(fields).length } });
-    session.actionHistory.push({ action: "fillForm", target: `${Object.keys(fields).length} fields`, timestamp: new Date().toISOString() });
+    // Only settle once at the end
+    await this.waitForSettle(session, isTurbo ? "lazy" : "normal");
+
+    this.logAction(session, { action: "fillForm", result: "success", metadata: { fieldCount: fieldEntries.length, turbo: isTurbo } });
+    session.actionHistory.push({ action: "fillForm", target: `${fieldEntries.length} fields`, timestamp: new Date().toISOString() });
 
     return {
       sessionId: session.id,
@@ -1360,50 +1798,39 @@ class BrowserService {
       await fs.writeFile(absolutePath, buffer);
     }
 
-    const metadata = {
+    let analysis = "";
+    if (analyze && visionService.isAvailable()) {
+      const visionResult = await visionService.analyzeScreenshot(buffer, prompt);
+      analysis = visionResult.analysis;
+    }
+
+    // Optimization: If analysis or local save is requested, suppress the large base64 string
+    // to prevent clogging the AI's/user's terminal output.
+    const shouldEmbed = analyze || saveLocal ? (embedImage === true && embedImage !== "lean") : !!embedImage;
+
+    const resultPayload = {
       sessionId: session.id,
-      path: absolutePath,
       url: session.page.url(),
+      path: absolutePath,
+      imageBase64: shouldEmbed ? buffer.toString("base64") : null,
+      analysis,
       timestamp: new Date().toISOString()
     };
 
     if (saveLocal) {
-      session.screenshotHistory.push(metadata);
+      session.screenshotHistory.push(resultPayload);
     }
+
+    // Real-time broadcast
+    if (_wsService) _wsService.screenshotTaken(session.id, resultPayload);
 
     this.logAction(session, {
       action: "screenshot",
       result: "success",
-      metadata: { ...metadata, saveLocal }
+      metadata: { ...resultPayload, saveLocal, imageBase64: !!resultPayload.imageBase64 }
     });
 
-    const result = {
-      sessionId: session.id,
-      path: absolutePath,
-      filePath: absolutePath,
-      metadata,
-      saveLocal
-    };
-
-    if (embedImage) {
-      result.imageBase64 = buffer.toString("base64");
-    }
-
-    if (analyze && visionService.isAvailable()) {
-      try {
-        const visionResult = await visionService.analyzeScreenshot(buffer, prompt);
-        result.analysis = visionResult.analysis;
-        result.visionAvailable = true;
-      } catch (error) {
-        result.analysis = `Vision analysis failed: ${error instanceof Error ? error.message : String(error)}`;
-        result.visionAvailable = false;
-      }
-    } else if (analyze) {
-      result.analysis = "Vision analysis requested but Vision AI is disabled (check GEMINI_API_KEY).";
-      result.visionAvailable = false;
-    }
-
-    return result;
+    return resultPayload;
   }
 
   async analyze({ sessionId }) {
@@ -1515,31 +1942,8 @@ class BrowserService {
     });
   }
 
-  async hover({ sessionId, selector, query }) {
-    const session = this.getSession(sessionId);
-    if (!session) throw new Error("Session not found");
-    return this.withAgentLock(session, async () => {
-      const resolved = await this.resolveSelector(session, { selector, query, action: "hover" });
+  // Redundant hover removed in favor of humanoid implementation at line 1407.
 
-      const locator = session.page.locator(resolved.selector).first();
-      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
-
-      const box = await locator.boundingBox();
-      if (box) {
-        const centerX = box.x + box.width / 2;
-        const centerY = box.y + box.height / 2;
-        await this.moveMouseNatural(session, { x: centerX, y: centerY });
-        await this.showRipple(session, centerX, centerY);
-      }
-
-      await locator.hover();
-      this.appendScratchpad(session, `Hovered: "${query || selector}"`);
-      this.logAction(session, { action: "hover", selector: resolved.selector, result: "success", metadata: { query } });
-      session.actionHistory.push({ action: "hover", target: query || selector, timestamp: new Date().toISOString() });
-
-      return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy };
-    });
-  }
 
   async wait({ sessionId, selector, query, text, timeoutMs }) {
     const session = this.getSession(sessionId);
@@ -1602,7 +2006,7 @@ class BrowserService {
     } else {
       // Custom Dropdown (Div/Button based)
       this.appendScratchpad(session, `  Dropdown is custom (${tagName}), attempting click-and-search...`);
-      
+
       // 1. Click to open
       await locator.click({ timeout: 2000 });
       await this.waitForSettle(session, "lazy");
@@ -1659,7 +2063,7 @@ class BrowserService {
       url: session.page.url(),
       timestamp: new Date().toISOString()
     };
-    
+
     this.appendScratchpad(session, `Generated PDF: ${safeName}`);
     this.logAction(session, { action: "generatePdf", result: "success", metadata });
     return { sessionId: session.id, path: absolutePath, filePath: absolutePath, metadata };
@@ -2139,7 +2543,7 @@ class BrowserService {
 
       const walk = (el, depth) => {
         if (depth > maxDepth) return null;
-        
+
         const rect = el.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) return null;
 
@@ -2213,7 +2617,7 @@ class BrowserService {
       const frequency = (arr) => {
         const counts = {};
         arr.forEach(x => counts[x] = (counts[x] || 0) + 1);
-        return Object.entries(counts).sort((a,b) => b[1] - a[1]).slice(0, 10).map(x => x[0]);
+        return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(x => x[0]);
       };
 
       return {
@@ -2290,6 +2694,7 @@ class BrowserService {
     }
 
     this.sessions.delete(sessionId);
+    await sessionStore.remove(sessionId);
     return { sessionId, cleanedUp: !!shouldCleanup };
   }
 
@@ -2556,6 +2961,33 @@ class BrowserService {
   async closeAll() {
     const ids = Array.from(this.sessions.keys());
     await Promise.all(ids.map((id) => this.closeSession({ sessionId: id })));
+  }
+
+  /** Enhanced analyze with optional AI semantic labels. */
+  async analyzeEnhanced({ sessionId, aiLabels = false }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const summary = await this.analyzePageState(session);
+
+    if (aiLabels && config.aiDecisionEnabled) {
+      try {
+        const { aiDecisionService } = await import("./aiDecisionService.js");
+        if (aiDecisionService.isAvailable()) {
+          summary.elements = await aiDecisionService.enhanceElementLabels(
+            summary.elements,
+            summary.title
+          );
+          summary.aiEnhanced = true;
+        }
+      } catch (err) {
+        svcLog.warn("AI label enhancement failed", { error: err.message });
+        summary.aiEnhanced = false;
+      }
+    }
+
+    this.logAction(session, { action: "analyzeEnhanced", result: "success", metadata: { url: summary.url, aiLabels } });
+    return { sessionId: session.id, ...summary };
   }
 }
 

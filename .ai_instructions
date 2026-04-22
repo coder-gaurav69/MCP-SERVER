@@ -1,0 +1,18 @@
+# STRICT AI OUTPUT PROTOCOL (All Models)
+
+This file contains the canonical rules for ANY AI model (GPT-4, DeepSeek, Claude, etc.) or agent working in this repository.
+
+## ⛔ ZERO ROOT CLUTTER
+1. **NO FILES IN ROOT**: Do not generate `.json`, `.js`, `.py`, `.txt`, `.html`, or `.ps1` files in the workspace root.
+2. **NO ROOT DIRS**: Do not create temporary folders at the root.
+3. **USE MANAGED OUTPUTS**: All temporary files MUST be written via MCP tools to the managed `src/.ai_outputs/` directory.
+
+## 🛠️ TOOLING WORKFLOW
+- **Step 1**: Check `browser_sessions`.
+- **Step 2**: Open/Reuse with `browser_open`.
+- **Step 3**: Analyze structure with `browser_analyze`.
+- **Step 4**: Interact (Prefer `browser_fill_form`).
+- **Step 5**: Verify with `browser_screenshot`.
+
+## ⚙️ SELF-CLEANING
+The project server is configured to automatically DELETE any non-allowlisted files at the root on startup. If you write to the root, your work will be lost.

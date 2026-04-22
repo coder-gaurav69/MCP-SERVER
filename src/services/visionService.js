@@ -54,7 +54,7 @@ class VisionService {
               }
             },
             {
-              text: prompt || "Analyze this screenshot in detail. Describe the layout, colors, fonts, spacing, and any visual effects you see."
+              text: prompt || "Analyze this screenshot in detail. Identify all form fields, their labels, and their interactive states. Describe the layout, colors, and any visual feedback elements like ripples or overlays. If there are input fields, estimate their locations relative to their labels."
             }
           ]
         }

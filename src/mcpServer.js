@@ -15,13 +15,22 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { browserService } from "./services/browserService.js";
+import { browserService, setBrowserServiceWs } from "./services/browserService.js";
 import { visionService } from "./services/visionService.js";
 import { scratchpadService } from "./services/scratchpadService.js";
 import { figmaService } from "./services/figmaService.js";
 import { projectSyncService } from "./services/projectSyncService.js";
+import { aiDecisionService } from "./services/aiDecisionService.js";
+import { queueService } from "./services/queueService.js";
+import { workerService } from "./services/workerService.js";
+import { selfHealingSelector } from "./services/selfHealingSelector.js";
+import { sessionStore } from "./services/sessionStore.js";
+import { wsService } from "./services/wsService.js";
+import { createServiceLogger } from "./services/loggerService.js";
 import { createApp } from "./app.js";
 import { config } from "./config.js";
+
+const bootLog = createServiceLogger("boot");
 
 const moduleFilePath = fileURLToPath(import.meta.url);
 const moduleDirPath = path.dirname(moduleFilePath);
@@ -91,7 +100,8 @@ export const registerAllTools = (serverInstance) => {
               isError: true,
               content: jsonText({
                 ok: false,
-                error: error instanceof Error ? error.message : String(error || "Unknown error")
+                error: (error instanceof Error ? error.message : String(error || "Unknown error")) + 
+                       (error.message.includes("Target closed") ? "\n\n💡 TIP: Browser crashed. Purging stale session. Please try browser_open again." : "")
               })
             };
           }
@@ -176,6 +186,13 @@ Use this for EVERY URL-related task. The user wants to see the browser window mo
       cleanup: z.boolean().optional()
     },
     ({ sessionId, cleanup }) => browserService.closeSession({ sessionId, cleanup })
+  );
+
+  tool(
+    "browser_cleanup",
+    "FORCE-CLEAR ALL SESSIONS. Use this ONLY as a last resort if you get stuck in a loop of browser errors. It wipes all sessions and starts fresh.",
+    {},
+    () => browserService.closeAll()
   );
 
   tool("browser_sessions", "List all active browser sessions. ALWAYS call this before browser_open to check if a session already exists.", {}, () => browserService.getSessions());
@@ -364,12 +381,13 @@ Use this for EVERY URL-related task. The user wants to see the browser window mo
 
   tool(
     "browser_fill_form",
-    "HIGH PRIORITY: Fill multiple form fields in ONE call. Pass fields as a key-value object: { 'First Name field': 'John', 'Email address': 'john@example.com' }. This is HIGHLY RECOMMENDED over calling browser_type multiple times as it executes 5x faster.",
+    "HIGH PRIORITY: Fill multiple form fields in ONE call. Pass fields as a key-value object: { 'First Name field': 'John', 'Email address': 'john@example.com' }. Set turbo=true for maximum speed (skips mouse animations). Recommended for complex forms.",
     {
       sessionId: z.string(),
-      fields: z.record(z.string())
+      fields: z.record(z.string()),
+      turbo: z.boolean().optional().describe("When true, executes at maximum speed by skipping mouse movements and using fast settling.")
     },
-    ({ sessionId, fields }) => browserService.fillForm({ sessionId, fields })
+    ({ sessionId, fields, turbo }) => browserService.fillForm({ sessionId, fields, turbo })
   );
 
   tool(
@@ -406,6 +424,13 @@ Use this for EVERY URL-related task. The user wants to see the browser window mo
 Run this tool before ANY interaction (click, type, fill_form) to discover valid selectors and page structure. It returns the most reliable identifiers for other tools.`,
     { sessionId: z.string() },
     ({ sessionId }) => browserService.analyze({ sessionId })
+  );
+
+  tool(
+    "browser_discover",
+    "DEEP EXPLORATION: Find all interactive elements (links, buttons, inputs) with heuristics. Use this for mapping out a website or finding hidden navigation paths.",
+    { sessionId: z.string() },
+    ({ sessionId }) => browserService.discoverClickables(sessionId)
   );
 
   tool(
@@ -477,10 +502,10 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
       fileName: z.string().optional(),
       fullPage: z.boolean().optional(),
       embedImage: z
-        .boolean()
+        .union([z.boolean(), z.enum(["lean"])])
         .optional()
         .default(true)
-        .describe("When true (default), returns an MCP image content block (PNG) so the client can show it inline."),
+        .describe("When true (default), returns an MCP image content block. Set to false or 'lean' to suppress large image data and only get text analysis."),
       saveLocal: z
         .boolean()
         .optional()
@@ -578,8 +603,19 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
     ({ sessionId, maxRoutes }) => browserService.captureLinkRoutes({ sessionId, maxRoutes })
   );
 
+  tool(
+    "browser_smart_scrape",
+    "GOD-LEVEL SCRAPING: Automatically detect and extract structured data (lists, tables, product cards) from the current page. Smarter than basic DOM extraction.",
+    {
+      sessionId: z.string().describe("Session ID from browser_open"),
+      query: z.string().optional().describe("Hint for what to scrape (e.g. 'product list')"),
+      maxItems: z.number().optional().default(20).describe("Max items to extract")
+    },
+    (args) => browserService.smartScrape(args)
+  );
+
   // ═══════════════════════════════════════════════════════════
-  // ─── Deep Clone & Pixel-Perfect Tools ──────────────────────
+  // ─── Vision AI Tools (Gemini Flash) ────────────────────────
   // ═══════════════════════════════════════════════════════════
 
   tool(
@@ -802,6 +838,162 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
     },
     async ({ cleanupRootClutter }) => projectSyncService.syncFix({ cleanupRootClutter })
   );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── AI Decision Layer ────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "browser_ai_plan",
+    "AI-POWERED: Convert a natural language goal into executable automation steps. Example: 'login with email test@test.com and password 123'. Returns a sequence of browser_* tool calls. Requires GEMINI_API_KEY.",
+    {
+      sessionId: z.string().optional().describe("Session ID for page context"),
+      goal: z.string().describe("Natural language goal (e.g. 'fill the signup form with name John')"),
+      execute: z.boolean().optional().default(false).describe("When true, executes the plan immediately instead of just returning it")
+    },
+    async ({ sessionId, goal, execute }) => {
+      let context = {};
+      if (sessionId) {
+        const session = browserService.getSession(sessionId);
+        if (session) {
+          const state = await browserService.analyzePageState(session);
+          context = {
+            url: state.url,
+            pageTitle: state.title,
+            interactiveElements: state.elements
+          };
+        }
+      }
+
+      const plan = await aiDecisionService.planFromGoal(goal, context);
+
+      if (!execute) {
+        return { plan, executed: false, tip: "Set execute=true to run this plan automatically" };
+      }
+
+      // Execute the plan
+      const results = [];
+      for (const step of plan.steps) {
+        try {
+          const params = { ...step.params, sessionId: step.params.sessionId || sessionId || "auto" };
+          const tool = toolsRegistry.find(t => t.name === step.tool);
+          if (tool) {
+            const result = await tool.handler(params);
+            results.push({ tool: step.tool, status: "success", result });
+          } else {
+            results.push({ tool: step.tool, status: "skipped", reason: "Tool not found" });
+          }
+        } catch (err) {
+          results.push({ tool: step.tool, status: "failed", error: err.message });
+        }
+      }
+
+      return { plan, executed: true, results };
+    }
+  );
+
+  tool(
+    "browser_ai_suggest_selector",
+    "AI-POWERED: Find the best CSS selector for an element described in natural language. Uses current page DOM for context.",
+    {
+      sessionId: z.string().describe("Session ID"),
+      description: z.string().describe("Natural language description of the element (e.g. 'the blue submit button')")
+    },
+    async ({ sessionId, description }) => {
+      const session = browserService.getSession(sessionId);
+      if (!session) throw new Error("Session not found");
+
+      const state = await browserService.analyzePageState(session);
+      const suggestion = await aiDecisionService.suggestSelector(description, state.elements);
+
+      return { sessionId, description, ...suggestion };
+    }
+  );
+
+  tool(
+    "browser_analyze_enhanced",
+    "ENHANCED page analysis: Returns interactive elements WITH AI-generated semantic labels (e.g. 'Login email input', 'Submit button'). Set aiLabels=true for AI enhancement. Requires GEMINI_API_KEY.",
+    {
+      sessionId: z.string(),
+      aiLabels: z.boolean().optional().default(false).describe("When true, uses AI to add semantic labels to each element")
+    },
+    ({ sessionId, aiLabels }) => browserService.analyzeEnhanced({ sessionId, aiLabels })
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Queue & Worker Management ───────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "browser_queue_job",
+    "Enqueue a browser automation job for async processing. Requires Redis. Returns a jobId for tracking.",
+    {
+      action: z.string().describe("Tool name to execute (e.g. 'browser_click')"),
+      params: z.record(z.any()).describe("Parameters for the tool"),
+      priority: z.number().optional().default(0).describe("Job priority (lower = higher priority)")
+    },
+    async ({ action, params, priority }) => {
+      if (!queueService.isReady) {
+        throw new Error("Queue not available. Set REDIS_URL in .env to enable job queues.");
+      }
+      return queueService.enqueue(action, params, { priority });
+    }
+  );
+
+  tool(
+    "browser_job_status",
+    "Check the status of a queued job by its jobId.",
+    {
+      jobId: z.string().describe("Job ID returned from browser_queue_job")
+    },
+    ({ jobId }) => queueService.getJobStatus(jobId)
+  );
+
+  tool(
+    "browser_queue_status",
+    "Get queue health metrics: waiting, active, completed, failed job counts.",
+    {},
+    () => queueService.getMetrics()
+  );
+
+  tool(
+    "browser_list_jobs",
+    "List recent queued jobs with their statuses.",
+    {
+      status: z.enum(["all", "completed", "failed", "active", "waiting"]).optional().default("all"),
+      limit: z.number().optional().default(20)
+    },
+    ({ status, limit }) => queueService.listJobs({ status, limit })
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Monitoring & Debug ───────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "browser_healing_stats",
+    "Get self-healing selector statistics: success rate, strategies used, and recent healing log.",
+    {},
+    () => ({
+      stats: selfHealingSelector.getStats(),
+      recentLog: selfHealingSelector.getHealingLog().slice(-10)
+    })
+  );
+
+  tool(
+    "browser_system_status",
+    "Full system health: queue metrics, worker stats, WebSocket clients, Redis status, session store, healing stats.",
+    {},
+    async () => ({
+      queue: await queueService.getMetrics(),
+      worker: workerService.getStats(),
+      websocket: wsService.getStats(),
+      redis: sessionStore.isRedisConnected,
+      healing: selfHealingSelector.getStats(),
+      aiDecision: aiDecisionService.isAvailable(),
+      sessions: browserService.getSessions()?.length || 0
+    })
+  );
 };
 
 /**
@@ -816,6 +1008,18 @@ export const runServer = async () => {
   await projectSyncService.ensureManagedDirs();
   // Auto-clean any junk files that AI agents may have created in root
   await projectSyncService.autoCleanOnStartup();
+
+  // ─── Boot New Services ─────────────────────────────────
+  bootLog.info("Booting production services...");
+
+  // 1. Session Store (Redis-backed or in-memory)
+  await sessionStore.connect();
+  bootLog.info(`Session Store: ${sessionStore.isRedisConnected ? "Redis" : "In-Memory"}`);
+
+  // 2. Queue Service
+  const queueReady = await queueService.init();
+  bootLog.info(`Queue Service: ${queueReady ? "Redis/BullMQ" : "Disabled (no Redis)"}`);
+
   // Register tools on the primary instance
   registerAllTools(server);
 
@@ -828,9 +1032,24 @@ export const runServer = async () => {
     console.error(`[INFO] Dashboard & REST API listening on http://${config.host}:${config.port}`);
     console.error(`[INFO] Transport mode: Stdio (primary) + HTTP (secondary)`);
     console.error(`[INFO] Vision AI: ${visionService.isAvailable() ? "ENABLED ✓" : "DISABLED (set GEMINI_API_KEY in .env)"}`);
+    console.error(`[INFO] AI Decision: ${aiDecisionService.isAvailable() ? "ENABLED ✓" : "DISABLED"}`);
+    console.error(`[INFO] Self-Healing: ${config.selfHealingEnabled ? "ENABLED ✓" : "DISABLED"}`);
+    console.error(`[INFO] Queue: ${queueReady ? "ENABLED ✓" : "DISABLED (set REDIS_URL in .env)"}`);
+    console.error(`[INFO] WebSocket: ws://${config.host}:${config.port}/ws`);
     console.error(`[INFO] Scratchpad: ${config.scratchpadDir}`);
     console.error(`[INFO] Session Reuse: ${config.sessionReuse ? "ON" : "OFF"}`);
   });
+
+  // 3. Attach WebSocket to HTTP server
+  wsService.attach(httpServer);
+  setBrowserServiceWs(wsService);
+  bootLog.info("WebSocket service attached");
+
+  // 4. Start Worker (if queue available)
+  if (queueReady) {
+    await workerService.start({ browserService, queueService, wsService });
+    bootLog.info("Worker service started");
+  }
 
   httpServer.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
@@ -843,7 +1062,10 @@ export const runServer = async () => {
   // Final cleanup on process exit
   const cleanup = async () => {
     try {
-      console.error("\nShutting down, cleaning up sessions...");
+      console.error("\nShutting down, cleaning up...");
+      await workerService.shutdown();
+      await queueService.shutdown();
+      await sessionStore.disconnect();
       await browserService.closeAll();
       httpServer.close();
       process.exit(0);
@@ -856,6 +1078,7 @@ export const runServer = async () => {
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
 
+  bootLog.info("All services booted successfully");
   await server.connect(transport);
 };
 

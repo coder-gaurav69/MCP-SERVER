@@ -18,14 +18,13 @@ const ROOT_ALLOWLIST = new Set([
   ".gitattributes",
   ".clinerules",
   ".cursorrules",
-  "ARCHITECTURE.md",
-  "MCP_TOOL_GUIDE.md",
-  "PROMPT_FOR_ANY_AI.md",
   "README.md",
   "package.json",
   "package-lock.json",
   "tsconfig.json",
-  "mcp-server.js"
+  "mcp.js",
+  "MCP_TOOL_GUIDE.md",
+  ".ai_instructions"
 ]);
 
 /**
@@ -35,8 +34,6 @@ const ROOT_DIR_ALLOWLIST = new Set([
   ".cursor",
   ".vscode",
   ".git",
-  ".mcp_data",
-  ".scratchpad",
   "node_modules",
   "out",
   "src"
@@ -48,12 +45,13 @@ class ProjectSyncService {
   }
 
   get managedDirs() {
+    const base = path.resolve(this.rootDir, "src/.ai_outputs");
     return [
-      path.resolve(this.rootDir, ".mcp_data"),
-      path.resolve(this.rootDir, config.screenshotDir),
-      path.resolve(this.rootDir, config.downloadsDir),
-      path.resolve(this.rootDir, config.scratchpadDir),
-      path.resolve(this.rootDir, ".mcp_data", "user_data")
+      base,
+      path.resolve(base, "screenshots"),
+      path.resolve(base, "downloads"),
+      path.resolve(base, "scratchpad"),
+      path.resolve(base, "user_data")
     ];
   }
 
