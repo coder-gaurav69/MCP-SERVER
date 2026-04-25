@@ -33,8 +33,8 @@ class AiDecisionService {
     }
   }
 
-  /** Send a text prompt to Gemini and get a response. */
-  async _prompt(text, { temperature = 0.1, maxTokens = 2048 } = {}) {
+  /** Send a text prompt to Gemini and get a response with retry logic for 429s. */
+  async _prompt(text, { temperature = 0.1, maxTokens = 2048, retries = 3 } = {}) {
     this._ensureAvailable();
 
     const body = {
@@ -46,21 +46,37 @@ class AiDecisionService {
     };
 
     const url = `${this.apiUrl}?key=${config.geminiApiKey}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+    
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Gemini API error (${response.status}): ${errorText}`);
+        if (response.status === 429) {
+          const waitSec = Math.pow(2, i) * 10;
+          log.warn(`Rate limited (429). Retrying in ${waitSec}s...`);
+          await new Promise(r => setTimeout(r, waitSec * 1000));
+          continue;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Gemini API error (${response.status}): ${errorText}`);
+        }
+
+        const result = await response.json();
+        const rawText = (result?.candidates?.[0]?.content?.parts || [])
+          .map(p => p.text || "").join("\n").trim();
+        return rawText;
+      } catch (err) {
+        if (i === retries - 1) throw err;
+        log.warn(`Prompt attempt ${i + 1} failed: ${err.message}. Retrying...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
-
-    const result = await response.json();
-    const rawText = (result?.candidates?.[0]?.content?.parts || [])
-      .map(p => p.text || "").join("\n").trim();
-    return rawText;
   }
 
   /** Parse JSON from AI response, stripping markdown fences. */
@@ -252,6 +268,61 @@ Rules:
     } catch (err) {
       log.warn("enhanceElementLabels failed, returning raw elements", { error: err.message });
       return elements;
+    }
+  }
+
+  /**
+   * Generate contextually appropriate data to fill a form autonomously.
+   * @param {string} goal - e.g. "Fill this with fake patient data"
+   * @param {Array} fields - List of fields from analyzePageState
+   * @param {string} pageTitle
+   * @returns {{ fields: Object, reasoning: string }}
+   */
+  async generateAutofillData(goal, fields, pageTitle = "") {
+    this._ensureAvailable();
+    log.info("Generating autofill data", { goal });
+
+    const filteredFields = fields
+      .filter(f => ['input', 'select', 'textarea'].includes(f.tag))
+      .map(f => ({
+        label: f.label,
+        name: f.name,
+        placeholder: f.placeholder,
+        tag: f.tag,
+        options: f.options
+      }))
+      .slice(0, 50);
+
+    const prompt = `You are a data entry expert. Generate realistic, contextually appropriate data to fill this form based on the goal.
+
+GOAL: "${goal || 'Fill the form completely with realistic test data'}"
+PAGE TITLE: "${pageTitle}"
+
+Available fields to fill:
+${JSON.stringify(filteredFields, null, 2)}
+
+Respond in JSON only:
+{
+  "fields": {
+    "Field Label or Name": "Generated Value",
+    ...
+  },
+  "reasoning": "Brief explanation of the generated data persona/context"
+}
+
+Rules:
+1. Map values to the exact "label", "name", or "placeholder" provided in the field list.
+2. For dates, use YYYY-MM-DD format.
+3. For selects, choose one of the available "options" if provided.
+4. For numbers (qty, rate), provide realistic small integers.
+5. If the goal specifies a persona (e.g. "John Doe"), use it. Otherwise, be creative but professional.`;
+
+    try {
+      const raw = await this._prompt(prompt);
+      return this._parseJson(raw);
+    } catch (err) {
+      log.error("generateAutofillData failed", { error: err.message });
+      throw new Error(`AI data generation failed: ${err.message}`);
     }
   }
 }

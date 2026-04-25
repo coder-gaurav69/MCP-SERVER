@@ -459,6 +459,16 @@ This tool does the work of exploring the entire site in one call.`,
   );
 
   tool(
+    "browser_autofill",
+    "AUTOPILOT: AI-driven autonomous form solver. Analyzes the current page, generates contextually appropriate data based on a high-level goal, and fills the form using the strict humanoid engine. No manual field mapping required.",
+    {
+      sessionId: z.string(),
+      goal: z.string().optional().describe("High-level goal for data generation (e.g. 'fill as a patient', 'use dummy info')")
+    },
+    ({ sessionId, goal }) => browserService.autofill({ sessionId, goal })
+  );
+
+  tool(
     "browser_flow",
     "Execute a built-in flow template (login/signup/formSubmission) with all fields at once.",
     {

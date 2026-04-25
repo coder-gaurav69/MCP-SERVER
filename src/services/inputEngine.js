@@ -69,24 +69,33 @@ async function strategyHybridInjection(page, locator, text) {
     el.value = value;
 
     // Dispatch the complete event chain that frameworks listen for
-    el.dispatchEvent(new Event("focus", { bubbles: true }));
-    el.dispatchEvent(new InputEvent("input", {
+    const focusEvent = new Event("focus", { bubbles: true });
+    focusEvent.__mcpAutomation = true;
+    el.dispatchEvent(focusEvent);
+
+    const inputEvent = new InputEvent("input", {
       bubbles: true,
       cancelable: true,
       inputType: "insertText",
       data: value
-    }));
-    el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+    });
+    inputEvent.__mcpAutomation = true;
+    el.dispatchEvent(inputEvent);
 
-    // For contentEditable elements
+    const changeEvent = new Event("change", { bubbles: true, cancelable: true });
+    changeEvent.__mcpAutomation = true;
+    el.dispatchEvent(changeEvent);
+
     if (el.isContentEditable) {
       el.textContent = value;
-      el.dispatchEvent(new InputEvent("input", {
+      const inputEvent = new InputEvent("input", {
         bubbles: true,
         cancelable: true,
         inputType: "insertText",
         data: value
-      }));
+      });
+      inputEvent.__mcpAutomation = true;
+      el.dispatchEvent(inputEvent);
     }
   }, String(text));
 
@@ -125,17 +134,23 @@ async function strategyReactNativeSet(page, locator, text) {
     // Call the native setter — this is the key trick for React
     nativeSetter.call(el, value);
 
-    // Dispatch a native input event that React will pick up
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    // Multi-event trigger for maximum framework compatibility
+    const events = ["input", "change", "blur"];
+    events.forEach(type => {
+      const e = new Event(type, { bubbles: true });
+      e.__mcpAutomation = true;
+      el.dispatchEvent(e);
+    });
 
     // Also try dispatching with InputEvent for newer React versions
-    el.dispatchEvent(new InputEvent("input", {
+    const inputEvent = new InputEvent("input", {
       bubbles: true,
       cancelable: true,
       inputType: "insertText",
       data: value
-    }));
+    });
+    inputEvent.__mcpAutomation = true;
+    el.dispatchEvent(inputEvent);
 
     return true;
   }, String(text));
@@ -200,13 +215,28 @@ async function strategyDOMDirect(page, locator, text) {
 
     for (const { Constructor, type, opts } of eventTypes) {
       try {
-        el.dispatchEvent(new Constructor(type, opts));
+        const e = new Constructor(type, opts);
+        e.__mcpAutomation = true;
+        el.dispatchEvent(e);
       } catch { /* some events may not be constructible in all browsers */ }
     }
 
-    // Blur to trigger validation
-    el.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    // 5. Fire events
+    const inputEv = new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: value });
+    inputEv.__mcpAutomation = true;
+    el.dispatchEvent(inputEv);
+
+    const changeEv = new Event("change", { bubbles: true });
+    changeEv.__mcpAutomation = true;
+    el.dispatchEvent(changeEv);
+
+    const blurEv = new FocusEvent("blur", { bubbles: true });
+    blurEv.__mcpAutomation = true;
+    el.dispatchEvent(blurEv);
+
+    const focusOutEv = new FocusEvent("focusout", { bubbles: true });
+    focusOutEv.__mcpAutomation = true;
+    el.dispatchEvent(focusOutEv);
 
     // Re-focus so the user sees the cursor in the field
     el.focus();
@@ -309,8 +339,13 @@ async function fillShadowDOMInput(page, locator, text) {
       inner.value = value;
     }
 
-    inner.dispatchEvent(new Event("input", { bubbles: true }));
-    inner.dispatchEvent(new Event("change", { bubbles: true }));
+    const inputEvent = new Event("input", { bubbles: true });
+    inputEvent.__mcpAutomation = true;
+    inner.dispatchEvent(inputEvent);
+
+    const changeEvent = new Event("change", { bubbles: true });
+    changeEvent.__mcpAutomation = true;
+    inner.dispatchEvent(changeEvent);
     return true;
   }, String(text));
 
@@ -372,16 +407,32 @@ export async function fillInput(page, locator, text, options = {}) {
 
   addLog(`[INPUT] Element: <${elementInfo.tag}> type="${elementInfo.type}" readonly=${elementInfo.isReadOnly} disabled=${elementInfo.isDisabled} shadow=${elementInfo.hasShadowRoot}`);
 
-  // Skip readonly/disabled
+  // Aggressive focus attempt for readonly/disabled fields (often toggles their state)
   if (elementInfo.isReadOnly || elementInfo.isDisabled) {
-    addLog(`[INPUT] SKIP: Element is ${elementInfo.isReadOnly ? "readonly" : "disabled"}`);
-    return {
-      success: false,
-      strategy: "skipped",
-      attempts: 0,
-      logs,
-      verification: { verified: false, reason: elementInfo.isReadOnly ? "readonly" : "disabled" }
-    };
+    addLog(`[INPUT] Element is initially ${elementInfo.isReadOnly ? "readonly" : "disabled"}. Attempting activation click...`);
+    await locator.click({ force: true, timeout: 1000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 100));
+    
+    // Re-check
+    const refreshed = await locator.evaluate(el => ({
+      isReadOnly: el.readOnly === true,
+      isDisabled: el.disabled === true
+    })).catch(() => elementInfo);
+
+    if (refreshed.isDisabled) {
+      addLog(`[INPUT] SKIP: Element is strictly disabled.`);
+      return {
+        success: false,
+        strategy: "skipped",
+        attempts: 0,
+        logs,
+        verification: { verified: false, reason: "disabled" }
+      };
+    }
+    
+    if (refreshed.isReadOnly) {
+      addLog(`[INPUT] Element is readonly, but continuing with injection strategies...`);
+    }
   }
 
   // Shadow DOM special case
@@ -419,6 +470,12 @@ export async function fillInput(page, locator, text, options = {}) {
 
   for (let i = 0; i < STRATEGIES.length; i++) {
     const strategy = STRATEGIES[i];
+    
+    // Skip keyboard typing for readonly elements as it definitely won't work
+    if (elementInfo.isReadOnly && strategy.name === "keyboard_type") {
+      continue;
+    }
+
     addLog(`[INPUT] Attempt ${i + 1}/${STRATEGIES.length}: ${strategy.label}`);
 
     try {

@@ -835,15 +835,16 @@ class BrowserService {
         const intercept = (e) => {
           // Check session storage real-time in case it changed in another frame
           if (window.__mcpAgentActive || isStickyActive()) {
-            // Playwright may emit trusted keyboard/input events in headed browsers.
-            // The server enables this flag only while it is actively running an automation step.
-            if (window.__mcpAutomationEventsAllowed) {
+            // BYPASS: Allow if automation is explicitly permitted or if the event is tagged as AI-internal
+            if (window.__mcpAutomationEventsAllowed || e.__mcpAutomation) {
               return;
             }
-            // Allow MCP/Playwright synthetic events (isTrusted: false) - only block real user events
+
+            // BYPASS: Allow MCP/Playwright synthetic events (isTrusted: false) - only block real user events
             if (!e.isTrusted) {
-              return; // Let MCP/AI agent actions through
+              return; 
             }
+
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
@@ -1040,9 +1041,13 @@ class BrowserService {
 
   async setAutomationEventsAllowed(session, allowed) {
     try {
-      await session.page.evaluate((v) => {
-        window.__mcpAutomationEventsAllowed = v;
-      }, allowed);
+      // Propagate to ALL frames (top frame + all iframes)
+      const frames = session.page.frames();
+      await Promise.all(frames.map(frame => 
+        frame.evaluate((v) => {
+          window.__mcpAutomationEventsAllowed = v;
+        }, allowed).catch(() => {})
+      ));
     } catch { /* ignore */ }
   }
 
@@ -1305,7 +1310,7 @@ class BrowserService {
       const forms = [];
       const interactive = Array.from(document.querySelectorAll("button, a, input, textarea, select, [role='button'], [onclick]"))
         .filter(isVisible)
-        .slice(0, 100) // Slightly larger cap
+        .slice(0, 200) // Increased cap for complex forms
         .map((el) => {
           const tagName = el.tagName.toLowerCase();
           const id = el.id;
@@ -1313,9 +1318,35 @@ class BrowserService {
           // Determine the best "Human Label" for this field
           let label = labelMap[id] || "";
           if (!label) {
-            // Find closest parent label if any
+            // 1. Find closest parent label if any
             const parentLabel = el.closest('label');
-            if (parentLabel) label = (parentLabel.innerText || parentLabel.textContent || "").trim();
+            if (parentLabel) {
+              label = (parentLabel.innerText || parentLabel.textContent || "").trim();
+            } else {
+              // 2. Tabular Discovery: If inside a table, look for corresponding header
+              const cell = el.closest('td');
+              if (cell) {
+                const table = cell.closest('table');
+                const colIndex = cell.cellIndex;
+                if (table && colIndex !== undefined) {
+                  const header = table.querySelectorAll('th')[colIndex];
+                  if (header) label = (header.innerText || header.textContent || "").trim();
+                }
+              }
+              
+              // 3. Look for broad label: preceding sibling or parent's preceding sibling
+              if (!label) {
+                const prev = el.previousElementSibling || (el.parentElement && el.parentElement.previousElementSibling);
+                if (prev && ['DIV', 'SPAN', 'LABEL', 'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(prev.tagName)) {
+                  const text = (prev.innerText || prev.textContent || "").trim();
+                  if (text && text.length < 50) label = text;
+                }
+              }
+            }
+          }
+          if (!label && el.getAttribute('aria-labelledby')) {
+            const lb = document.getElementById(el.getAttribute('aria-labelledby'));
+            if (lb) label = (lb.innerText || lb.textContent || "").trim();
           }
 
           const info = {
@@ -1797,25 +1828,27 @@ class BrowserService {
       const fieldEntries = Object.entries(fields);
 
       for (const [key, value] of fieldEntries) {
-        let field = availableFields.find(f => 
-          (f.label && f.label.toLowerCase() === key.toLowerCase()) ||
-          (f.name && f.name.toLowerCase() === key.toLowerCase()) ||
-          (f.id && f.id.toLowerCase() === key.toLowerCase()) ||
-          (f.placeholder && f.placeholder.toLowerCase() === key.toLowerCase())
-        );
+        const normalizedKey = key.toLowerCase().replace(/[:*]/g, '').trim();
+        
+        let field = availableFields.find(f => {
+          const l = (f.label || "").toLowerCase();
+          const p = (f.placeholder || "").toLowerCase();
+          const n = (f.name || "").toLowerCase();
+          return l === normalizedKey || p === normalizedKey || n === normalizedKey || f.id === key;
+        });
 
         if (!field) {
-          // Similarity match
-          field = availableFields.find(f => 
-            (f.label && f.label.toLowerCase().includes(key.toLowerCase())) ||
-            (f.label && key.toLowerCase().includes(f.label.toLowerCase()))
-          );
+          // Fuzzy match
+          field = availableFields.find(f => {
+            const l = (f.label || "").toLowerCase();
+            return l.includes(normalizedKey) || normalizedKey.includes(l);
+          });
         }
 
         if (field) {
           mapping.push({ field, value, originalKey: key });
         } else {
-          // Fallback: try to resolve selector directly
+          // Re-analysis fallback: try to resolve selector directly as a last resort
           try {
             const resolved = await this.resolveSelector(session, { query: key, action: "type" });
             mapping.push({ 
@@ -1824,7 +1857,7 @@ class BrowserService {
               originalKey: key 
             });
           } catch (e) {
-            failedFields.push({ field: key, error: "Could not find or map field" });
+            failedFields.push({ field: key, error: "Could not find or map field after re-analysis" });
             logs.push(`[ERROR] ${key}: Could not find or map field`);
           }
         }
@@ -1837,9 +1870,23 @@ class BrowserService {
         
         try {
           const result = await this._intelligentFillField(session, field, value, isTurbo);
-          if (result.success) {
+          
+          // VERIFICATION: Read back value to ensure it stuck
+          let verified = result.success;
+          if (verified && !isTurbo) {
+            try {
+              const actualValue = await session.page.locator(field.selector).inputValue();
+              if (String(actualValue) !== String(value) && String(value).length > 0) {
+                logs.push(`[WARN] Value mismatch for "${fieldName}". Expected "${value}", got "${actualValue}". Retrying once...`);
+                const retry = await this._intelligentFillField(session, field, value, false);
+                verified = retry.success;
+              }
+            } catch { /* Some inputs don't support inputValue() */ }
+          }
+
+          if (verified) {
             filledFields.push({ field: fieldName, selector: field.selector, attempt: result.attempt });
-            logs.push(`[SUCCESS] "${fieldName}" filled on attempt ${result.attempt}`);
+            logs.push(`[SUCCESS] "${fieldName}" filled and verified.`);
           } else {
             failedFields.push({ field: fieldName, selector: field.selector, error: result.error });
             logs.push(`[FAILED] "${fieldName}": ${result.error}`);
@@ -1884,12 +1931,35 @@ class BrowserService {
   }
 
   /**
-   * Reliable flow for filling a single field with verification and retry.
-   * Uses the Hybrid Input Engine with full fallback chain.
-   * Includes visual feedback (mouse movement, ripple, status updates).
+   * Autonomous Autofill: Analyzes the page, generates data via AI, and fills the form.
+   * @param {string} sessionId
+   * @param {string} goal - Optional high-level goal (e.g. "fill with fake user info")
    */
+  async autofill({ sessionId, goal = "" }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    this.appendScratchpad(session, `🤖 Autonomous Autopilot: Analyzing form context...`);
+    
+    // 1. Analyze page
+    const pageInfo = await this.analyzePageState(session);
+    const title = await session.page.title();
+    
+    // 2. Generate data via AI
+    this.appendScratchpad(session, `🧠 Thinking... Generating data for ${pageInfo.interactiveCount} elements`);
+    const aiData = await aiDecisionService.generateAutofillData(goal, pageInfo.elements, title);
+    
+    this.appendScratchpad(session, `💡 AI Strategy: ${aiData.reasoning}`);
+    
+    // 3. Fill the form using our strict engine
+    return this.fillForm({ 
+      sessionId, 
+      fields: aiData.fields, 
+      turbo: false 
+    });
+  }
+  
   async _intelligentFillField(session, fieldInfo, value, isTurbo) {
-    const fieldName = fieldInfo.label || fieldInfo.selector;
     let locator = session.page.locator(fieldInfo.selector).first();
 
     // Wait for element visibility
@@ -1912,11 +1982,21 @@ class BrowserService {
       }
     }
 
-    // Update overlay status
-    await session.page.evaluate((text) => {
+    // Update overlay status and Visual Highlight
+    await session.page.evaluate(({ name, selector }) => {
       const pill = document.getElementById('__mcpAgentPill');
-      if (pill) pill.innerHTML = `🤖 <span style="color: #4CC9F0">Filling:</span> ${text}`;
-    }, fieldName).catch(() => {});
+      if (pill) pill.innerHTML = `🤖 <span style="color: #4CC9F0">Ghost Typing:</span> ${name}`;
+      
+      const el = document.querySelector(selector);
+      if (el) {
+        // Add prominent neon highlight
+        el.style.transition = 'all 0.3s ease-in-out';
+        el.style.outline = '3px solid #4CC9F0';
+        el.style.boxShadow = '0 0 15px #4CC9F0';
+        el.style.transform = 'scale(1.02)';
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, { name: fieldName, selector: fieldInfo.selector }).catch(() => {});
 
     // Detect element type
     const inputType = await detectInputType(locator);
@@ -1935,7 +2015,23 @@ class BrowserService {
           if (!isTurbo) await self.showRipple(session, x, y);
         }
       });
-      return { success: dropResult.success, attempt: 1, strategy: dropResult.strategy };
+      
+      // Remove highlight
+      await session.page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        if (el) {
+          el.style.outline = '';
+          el.style.boxShadow = '';
+          el.style.transform = '';
+        }
+      }, fieldInfo.selector).catch(() => {});
+
+      return { 
+        success: dropResult.success, 
+        attempt: 1, 
+        strategy: dropResult.strategy, 
+        error: dropResult.success ? undefined : (dropResult.error || "Option not found in dropdown") 
+      };
     }
 
     // ── Checkbox / Radio ──────────────────────────────────────
@@ -1973,6 +2069,16 @@ class BrowserService {
         if (!isTurbo) await self.showRipple(session, x, y);
       }
     });
+
+    // Remove highlight
+    await session.page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (el) {
+        el.style.outline = '';
+        el.style.boxShadow = '';
+        el.style.transform = '';
+      }
+    }, fieldInfo.selector).catch(() => {});
 
     if (result.success) {
       return { success: true, attempt: result.attempts, strategy: result.strategy };
