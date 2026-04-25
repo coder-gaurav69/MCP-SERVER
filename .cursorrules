@@ -10,7 +10,7 @@ Every AI model (GPT, Claude, DeepSeek, OpenCode, etc.) and agent (Cursor, Roo, W
 ## 2. WHERE TO PUT FILES
 - **Source Code Logic** → `src/`
 - **Temporary Files / Tests / Experiments** → Use the `browser_scratchpad_write` tool. 
-- **Physical Location**: All scratchpad files are stored in `src/.ai_outputs/scratchpad/`.
+- **Physical Location**: All AI-generated files are stored in `src/.ai_outputs/ai_workspace/<sessionId>/` under `scripts`, `tests`, `pages`, `artifacts`, `notes`, or `tmp`.
 - **Screenshots**: Stored in `src/.ai_outputs/screenshots/`.
 
 ## 3. TOOL USAGE RULES

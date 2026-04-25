@@ -9,6 +9,8 @@ import { moveMouseHumanoid, typeHumanoid } from "../utils/humanoid.js";
 import { selfHealingSelector } from "./selfHealingSelector.js";
 import { sessionStore } from "./sessionStore.js";
 import { createServiceLogger, logAction as logStructuredAction } from "./loggerService.js";
+import { fillInput, selectDropdown, detectInputType } from "./inputEngine.js";
+import { aiDecisionService } from "./aiDecisionService.js";
 
 const svcLog = createServiceLogger("browser-service");
 
@@ -97,22 +99,25 @@ class BrowserService {
       return { navigatedVia: "already_there" };
     }
 
-    const clicked = await page.evaluate((want) => {
+    const targetData = await page.evaluate((want) => {
       for (const a of document.querySelectorAll("a[href]")) {
         if (a.href !== want) continue;
         const r = a.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) continue;
-        a.click();
-        return true;
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: (a.innerText || '').trim().slice(0, 50) };
       }
-      return false;
+      return null;
     }, targetHref);
 
-    if (!clicked) {
-      await page.goto(targetHref, { waitUntil: "domcontentloaded", timeout: config.defaultTimeoutMs });
-      await this.waitForSettle(session);
-      return { navigatedVia: "goto_fallback" };
+    // SMART LOGIC: If no link found on page, DO NOT fallback to goto. Report not found.
+    if (!targetData) {
+      return { navigatedVia: "not_found" };
     }
+
+    // Humanoid interaction: move mouse → ripple → physical click
+    await this.moveMouseNatural(session, { x: targetData.x, y: targetData.y });
+    await this.showRipple(session, targetData.x, targetData.y);
+    await page.mouse.click(targetData.x, targetData.y);
 
     try {
       await page.waitForFunction(
@@ -126,13 +131,13 @@ class BrowserService {
           }
         },
         targetKey,
-        { timeout: config.defaultTimeoutMs }
+        { timeout: 5000 }
       );
     } catch {
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(200);
     }
-    await this.waitForSettle(session);
-    return { navigatedVia: "click" };
+    await this.waitForSettle(session, "lazy");
+    return { navigatedVia: "click", linkText: targetData.text };
   }
 
   /** Find an existing session on the same origin. Returns session or null. */
@@ -494,6 +499,7 @@ class BrowserService {
         };
 
         window.__mcpAgentActive = isStickyActive();
+        window.__mcpAutomationEventsAllowed = false;
 
         const setupUI = () => {
           const isMainFrame = window.self === window.top;
@@ -613,15 +619,13 @@ class BrowserService {
             user-select: none;
           `;
 
-          /* ── Subtle vignette (edge-only blur + tint) ── */
+          /* ── Subtle vignette (edge-only tint, NO BLUR for visibility) ── */
           const vignette = document.createElement('div');
           vignette.style.cssText = `
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: radial-gradient(ellipse at center, transparent 50%, rgba(30,27,75,0.08) 100%);
-            backdrop-filter: blur(3px);
-            -webkit-backdrop-filter: blur(3px);
-            mask-image: radial-gradient(ellipse at center, transparent 65%, black 100%);
-            -webkit-mask-image: radial-gradient(ellipse at center, transparent 65%, black 100%);
+            background: radial-gradient(ellipse at center, transparent 60%, rgba(30,27,75,0.04) 100%);
+            mask-image: radial-gradient(ellipse at center, transparent 70%, black 100%);
+            -webkit-mask-image: radial-gradient(ellipse at center, transparent 70%, black 100%);
             pointer-events: none; z-index: 1;
           `;
           overlay.appendChild(vignette);
@@ -831,6 +835,11 @@ class BrowserService {
         const intercept = (e) => {
           // Check session storage real-time in case it changed in another frame
           if (window.__mcpAgentActive || isStickyActive()) {
+            // Playwright may emit trusted keyboard/input events in headed browsers.
+            // The server enables this flag only while it is actively running an automation step.
+            if (window.__mcpAutomationEventsAllowed) {
+              return;
+            }
             // Allow MCP/Playwright synthetic events (isTrusted: false) - only block real user events
             if (!e.isTrusted) {
               return; // Let MCP/AI agent actions through
@@ -949,34 +958,20 @@ class BrowserService {
   }
 
   async waitForSettle(session, policy = "normal") {
-    const timeout = policy === "lazy" ? 50 : policy === "strict" ? 2000 : 500;
+    const timeout = policy === "lazy" ? 50 : policy === "strict" ? 1000 : 300;
 
-    // Domain-specific cold start protection
-    const url = session.page.url();
-    const isSlowDomain = url.includes("onrender.com") || url.includes("vercel.app") || url.includes("render.com");
-    // OnRender is slow to wake up, but once it starts, we don't need a huge wait per action.
-    // We only force a long wait if the page title suggests it's still "loading/waking up".
-    const effectiveTimeout = timeout;
-
-    if (config.turboMode && policy !== "strict" && !isSlowDomain) {
+    if (config.turboMode && policy !== "strict") {
       try {
-        await session.page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => { });
-        await new Promise(r => setTimeout(r, 50));
+        await session.page.waitForLoadState("networkidle", { timeout: 800 }).catch(() => { });
       } catch { /* ignore */ }
       return;
     }
 
-    /**
-     * Intelligent wait for page stability.
-     * 1. Waits for initial load.
-     * 2. Waits for network idle.
-     * 3. Uses MutationObserver to ensure the DOM has stopped shifting for at least 500ms.
-     */
     try {
-      await session.page.waitForLoadState("load", { timeout: 10000 }).catch(() => { });
-      await session.page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => { });
+      await session.page.waitForLoadState("load", { timeout: 5000 }).catch(() => { });
+      await session.page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => { });
 
-      // Stabilization: Wait for DOM mutations to stabilize (no changes for 500ms)
+      // Stabilization: Wait for DOM mutations to stabilize (no changes for 200ms)
       await session.page.waitForFunction(() => {
         return new Promise((resolve) => {
           let lastMutation = Date.now();
@@ -986,22 +981,22 @@ class BrowserService {
           observer.observe(document.body, { childList: true, subtree: true, attributes: true });
 
           const check = setInterval(() => {
-            if (Date.now() - lastMutation > 500) {
+            if (Date.now() - lastMutation > 200) {
               clearInterval(check);
               observer.disconnect();
               resolve(true);
             }
-          }, 100);
+          }, 50);
 
           setTimeout(() => {
             clearInterval(check);
             observer.disconnect();
             resolve(true);
-          }, 5000); // Max stabilization wait
+          }, 2000); // Max stabilization wait
         });
-      }, { timeout: 6000 }).catch(() => { });
+      }, { timeout: 3000 }).catch(() => { });
 
-      await new Promise(r => setTimeout(r, effectiveTimeout));
+      await new Promise(r => setTimeout(r, timeout));
     } catch { /* ignore */ }
   }
 
@@ -1043,6 +1038,23 @@ class BrowserService {
     } catch { /* ignore */ }
   }
 
+  async setAutomationEventsAllowed(session, allowed) {
+    try {
+      await session.page.evaluate((v) => {
+        window.__mcpAutomationEventsAllowed = v;
+      }, allowed);
+    } catch { /* ignore */ }
+  }
+
+  async withAutomationEventsAllowed(session, fn) {
+    await this.setAutomationEventsAllowed(session, true);
+    try {
+      return await fn();
+    } finally {
+      await this.setAutomationEventsAllowed(session, false);
+    }
+  }
+
   /**
    * Wraps an async function with interaction lock.
    * Ensures setAgentActive(true/false) is always toggled via try/finally.
@@ -1050,8 +1062,9 @@ class BrowserService {
   async withAgentLock(session, fn) {
     await this.setAgentActive(session, true);
     try {
-      return await fn();
+      return await this.withAutomationEventsAllowed(session, fn);
     } finally {
+      await this.setAutomationEventsAllowed(session, false);
       await this.setAgentActive(session, false);
     }
   }
@@ -1389,16 +1402,121 @@ class BrowserService {
     });
   }
 
+  /**
+   * Discover all real navigation links on the current page.
+   * Returns only visible <a> tags with real hrefs — no fabrication.
+   * Used by openUrl to guide AI agents toward real links.
+   */
+  async discoverNavLinks(session) {
+    try {
+      return await session.page.evaluate(() => {
+        const origin = window.location.origin;
+        const seen = new Set();
+        const results = [];
+
+        const isVisible = (el) => {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+
+        // Prioritize nav/header/footer links, then all links
+        const selectors = ['nav a', 'header a', 'footer a', '[role="navigation"] a', 'a'];
+        for (const sel of selectors) {
+          for (const a of document.querySelectorAll(sel)) {
+            const href = a.getAttribute('href');
+            if (!href || href === '#' || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) continue;
+            if (!isVisible(a)) continue;
+
+            const text = (a.innerText || '').trim();
+            if (!text || text.length > 60) continue;
+
+            const fullUrl = a.href;
+            const key = `${text}|${fullUrl}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            const isInternal = fullUrl.startsWith(origin);
+            results.push({
+              text,
+              href,
+              fullUrl,
+              isInternal,
+              context: sel.replace(' a', '') // "nav", "header", "footer", etc.
+            });
+          }
+        }
+
+        return results.slice(0, 30); // Cap for AI readability
+      });
+    } catch {
+      return [];
+    }
+  }
+
   async openUrl({ sessionId, url, headless, persist }) {
+    if (!url) throw new Error("Missing required parameter: url");
     const session = await this.getOrCreateSession(sessionId, { headless, persist, url });
     await this.setAgentActive(session, true);
     try {
+      // SMART NAVIGATION: If already on the same site, ONLY navigate by clicking real links.
+      // NEVER fabricate routes by doing a direct goto on the same domain.
+      const currentUrl = session.page.url();
+      const isAlreadyOnSite = currentUrl && currentUrl !== "about:blank" && (() => {
+        try {
+          return new URL(url).origin === new URL(currentUrl).origin;
+        } catch { return false; }
+      })();
+
+      if (isAlreadyOnSite) {
+        this.appendScratchpad(session, `🔗 Smart nav: looking for clickable link → "${url}"`);
+        const navResult = await this.navigateInternalByClick(session, url);
+
+        if (navResult.navigatedVia === "click") {
+          const title = await session.page.title();
+          this.logAction(session, { action: "openUrl", result: "success", metadata: { url, method: "humanoid_click" } });
+          return {
+            sessionId: session.id,
+            url: session.page.url(),
+            title,
+            status: "success",
+            method: "humanoid_click",
+            tip: "AI TIP: Run 'browser_analyze' next to see what you can interact with on this page."
+          };
+        }
+
+        if (navResult.navigatedVia === "already_there") {
+          const title = await session.page.title();
+          return {
+            sessionId: session.id,
+            url: session.page.url(),
+            title,
+            status: "success",
+            method: "already_there",
+            tip: "You are already on this page."
+          };
+        }
+
+        // NOT FOUND — this link does NOT exist on the page. Do NOT fallback to goto.
+        this.logAction(session, { action: "openUrl", result: "link_not_found", metadata: { url } });
+        const availableLinks = await this.discoverNavLinks(session);
+        return {
+          sessionId: session.id,
+          url: currentUrl,
+          status: "link_not_found",
+          error: `No clickable link found on the current page for "${url}". Do NOT guess routes — only use links that actually exist on the page.`,
+          availableLinks,
+          tip: "AI TIP: Use the 'availableLinks' list above. Click only REAL links that exist on the page. Do NOT fabricate URLs."
+        };
+      }
+
+      // FIRST VISIT to a new domain — use goto
       await session.page.goto(url, {
-        waitUntil: "load", // Changed from domcontentloaded for better initial reliability
+        waitUntil: "load",
         timeout: config.defaultTimeoutMs
       });
 
-      // Wait for the page to stop shifting (Stabilize)
       await this.waitForSettle(session, "strict");
       let title = await session.page.title();
 
@@ -1429,6 +1547,9 @@ class BrowserService {
         }
       }
 
+      // After first visit, auto-discover links for the AI
+      const availableLinks = await this.discoverNavLinks(session);
+
       this.appendScratchpad(session, `Opened: ${url} → "${title}"`);
       this.logAction(session, { action: "open", selector: url, result: "success", metadata: { url } });
       session.actionHistory.push({ action: "open", target: url, timestamp: new Date().toISOString() });
@@ -1437,7 +1558,8 @@ class BrowserService {
         url: session.page.url(),
         title,
         status: "success",
-        tip: "AI TIP: Run 'browser_analyze' next to see what you can interact with on this page."
+        availableLinks,
+        tip: "AI TIP: To explore this site, use browser_click with the link text from 'availableLinks'. Do NOT fabricate URLs."
       };
     } finally {
       await this.setAgentActive(session, false);
@@ -1602,55 +1724,50 @@ class BrowserService {
       const locator = session.page.locator(resolved.selector).first();
       await locator.waitFor({ state: "visible", timeout: 8000 });
 
-      // Check if readonly or disabled
-      const isReady = await locator.evaluate(el => {
-        return !el.readOnly && !el.disabled && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.hasAttribute('contenteditable'));
-      });
-
-      if (!isReady) {
-        const status = await locator.evaluate(el => el.readOnly ? "readonly" : el.disabled ? "disabled" : "not-editable");
-        this.appendScratchpad(session, `Skipped typing into ${status} field: "${query || selector}"`);
-        return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, status: "skipped", reason: status };
-      }
-
-      if (!config.turboMode) {
-        const box = await locator.boundingBox();
-        if (box) {
-          const centerX = box.x + box.width / 2;
-          const centerY = box.y + box.height / 2;
-          await this.moveMouseNatural(session, { x: centerX, y: centerY });
-          await this.showRipple(session, centerX, centerY);
+      // ─── USE HYBRID INPUT ENGINE ─────────────────────────────
+      const self = this;
+      const result = await fillInput(session.page, locator, String(text), {
+        turbo: config.turboMode,
+        onLog: (msg) => self.appendScratchpad(session, `  ${msg}`),
+        onMouseMove: async (x, y) => {
+          if (!config.turboMode) await self.moveMouseNatural(session, { x, y });
+        },
+        onRipple: async (x, y) => {
+          if (!config.turboMode) await self.showRipple(session, x, y);
         }
-      }
-
-      await locator.click({ timeout: config.defaultTimeoutMs, force: config.turboMode });
-      await locator.fill("");
-
-      if (config.turboMode) {
-        await locator.fill(String(text));
-      } else {
-        await typeHumanoid(locator, String(text));
-        await new Promise(r => setTimeout(r, 400));
-      }
-
-      // Force trigger events for dynamic UIs (React/Vue/etc)
-      await locator.evaluate(el => {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur', { bubbles: true }));
       });
 
       await this.waitForSettle(session);
 
-      this.appendScratchpad(session, `Typed into "${query || selector}": "${String(text).slice(0, 30)}..."`);
-      this.logAction(session, { action: "type", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy, textLength: text.length } });
+      const logMsg = result.success
+        ? `✅ Typed into "${query || selector}" via ${result.strategy} (${result.attempts} attempt(s))`
+        : `⚠ Typing into "${query || selector}" may have failed (strategy: ${result.strategy})`;
+      this.appendScratchpad(session, logMsg);
+
+      this.logAction(session, {
+        action: "type",
+        selector: resolved.selector,
+        result: result.success ? "success" : "partial",
+        metadata: {
+          query,
+          strategy: result.strategy,
+          resolveStrategy: resolved.strategy,
+          textLength: text.length,
+          attempts: result.attempts,
+          verified: result.verification?.verified,
+          inputEngineLogs: result.logs
+        }
+      });
       session.actionHistory.push({ action: "type", target: query || selector, timestamp: new Date().toISOString() });
 
       return {
         sessionId: session.id,
         selector: resolved.selector,
-        strategy: resolved.strategy,
-        typedLength: text.length
+        strategy: `${resolved.strategy}→${result.strategy}`,
+        typedLength: text.length,
+        verified: result.verification?.verified ?? false,
+        inputMethod: result.strategy,
+        attempts: result.attempts
       };
     });
   }
@@ -1661,125 +1778,225 @@ class BrowserService {
     if (!fields || typeof fields !== "object") throw new Error("fields must be an object like { 'email field': 'test@example.com', ... }");
 
     const isTurbo = turbo !== null ? this.toBoolean(turbo) : config.turboMode;
-
     await this.setAgentActive(session, true);
-    this.appendScratchpad(session, `Filling form with ${Object.keys(fields).length} fields (turbo=${isTurbo})`);
+    
+    const startTime = Date.now();
+    const logs = [];
+    const filledFields = [];
+    const failedFields = [];
 
-    const results = [];
-    const fieldEntries = Object.entries(fields);
+    this.appendScratchpad(session, `🚀 Intelligent Form Fill started (Turbo=${isTurbo})`);
 
-    // 🚀 STEP 1: Batch Selector Resolution (The "Thinking" Phase)
-    // Resolve all selectors in parallel at the start to eliminate pauses between movements
-    this.appendScratchpad(session, `  ⏳ Resolving all fields...`);
-    const resolutionResults = await Promise.all(
-      fieldEntries.map(async ([query, value]) => {
-        try {
-          const resolved = await this.resolveSelector(session, { query, action: "type" });
-          return { query, value, resolved, error: null };
-        } catch (error) {
-          return { query, value, resolved: null, error: error.message };
+    try {
+      // 1. Analyze page to get structured field intelligence
+      const pageInfo = await this.analyzePageState(session);
+      const availableFields = pageInfo.elements;
+
+      // 2. Map user data to fields
+      const mapping = [];
+      const fieldEntries = Object.entries(fields);
+
+      for (const [key, value] of fieldEntries) {
+        let field = availableFields.find(f => 
+          (f.label && f.label.toLowerCase() === key.toLowerCase()) ||
+          (f.name && f.name.toLowerCase() === key.toLowerCase()) ||
+          (f.id && f.id.toLowerCase() === key.toLowerCase()) ||
+          (f.placeholder && f.placeholder.toLowerCase() === key.toLowerCase())
+        );
+
+        if (!field) {
+          // Similarity match
+          field = availableFields.find(f => 
+            (f.label && f.label.toLowerCase().includes(key.toLowerCase())) ||
+            (f.label && key.toLowerCase().includes(f.label.toLowerCase()))
+          );
         }
-      })
-    );
 
-    // 🚀 STEP 2: Sequential Interaction (The "Action" Phase)
-    for (const { query, value, resolved, error } of resolutionResults) {
-      if (error) {
-        results.push({ field: query, status: "failed", error });
-        continue;
+        if (field) {
+          mapping.push({ field, value, originalKey: key });
+        } else {
+          // Fallback: try to resolve selector directly
+          try {
+            const resolved = await this.resolveSelector(session, { query: key, action: "type" });
+            mapping.push({ 
+              field: { selector: resolved.selector, label: key, tag: 'input', type: 'text' }, 
+              value, 
+              originalKey: key 
+            });
+          } catch (e) {
+            failedFields.push({ field: key, error: "Could not find or map field" });
+            logs.push(`[ERROR] ${key}: Could not find or map field`);
+          }
+        }
       }
 
+      // 3. Execute filling with reliability flow
+      for (const { field, value, originalKey } of mapping) {
+        const fieldName = field.label || originalKey;
+        logs.push(`[FILL] Starting "${fieldName}"`);
+        
+        try {
+          const result = await this._intelligentFillField(session, field, value, isTurbo);
+          if (result.success) {
+            filledFields.push({ field: fieldName, selector: field.selector, attempt: result.attempt });
+            logs.push(`[SUCCESS] "${fieldName}" filled on attempt ${result.attempt}`);
+          } else {
+            failedFields.push({ field: fieldName, selector: field.selector, error: result.error });
+            logs.push(`[FAILED] "${fieldName}": ${result.error}`);
+          }
+        } catch (err) {
+          failedFields.push({ field: fieldName, selector: field.selector, error: err.message });
+          logs.push(`[CRITICAL] "${fieldName}": ${err.message}`);
+        }
+      }
+
+      // 4. Final Settle & Screenshot
+      await this.waitForSettle(session, isTurbo ? "lazy" : "strict");
+      const screenshotResult = await this.screenshot({ sessionId: session.id, saveLocal: true, fileName: `form-filled-${Date.now()}.png` });
+
+      const success = failedFields.length === 0;
+      const resultReport = {
+        success,
+        filledFields,
+        failedFields,
+        logs,
+        screenshot: screenshotResult.path,
+        durationMs: Date.now() - startTime
+      };
+
+      this.logAction(session, { 
+        action: "fillForm", 
+        result: success ? "success" : "partial_failure", 
+        metadata: resultReport 
+      });
+      
+      this.appendScratchpad(session, `✅ Form fill complete. Success: ${success}.`);
+      return resultReport;
+
+    } finally {
+      await this.setAgentActive(session, false);
+      // Reset status overlay
+      await session.page.evaluate(() => {
+        const pill = document.getElementById('__mcpAgentPill');
+        if (pill) pill.innerText = '🤖 MCP Agent Active';
+      }).catch(() => { });
+    }
+  }
+
+  /**
+   * Reliable flow for filling a single field with verification and retry.
+   * Uses the Hybrid Input Engine with full fallback chain.
+   * Includes visual feedback (mouse movement, ripple, status updates).
+   */
+  async _intelligentFillField(session, fieldInfo, value, isTurbo) {
+    const fieldName = fieldInfo.label || fieldInfo.selector;
+    let locator = session.page.locator(fieldInfo.selector).first();
+
+    // Wait for element visibility
+    try {
+      await locator.waitFor({ state: "visible", timeout: 4000 });
+    } catch {
+      // Self-healing: try to find the element again
       try {
-        const locator = session.page.locator(resolved.selector).first();
-
-        // Dynamic timeout based on mode
-        const waitTimeout = isTurbo ? 1000 : 3000;
-        await locator.waitFor({ state: "visible", timeout: waitTimeout });
-
-        // Ensure field is in view and ready for interaction
-        await locator.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => { });
-
-        // Visual feedback (Humanoid mode)
-        if (!isTurbo) {
-          const box = await locator.boundingBox();
-          if (box) {
-            const centerX = box.x + box.width / 2;
-            const centerY = box.y + box.height / 2;
-            // Slightly faster mouse for batch forms
-            await this.moveMouseNatural(session, { x: centerX, y: centerY });
-            await this.showRipple(session, centerX, centerY);
-          }
-        }
-
-        const tagName = await locator.evaluate(el => el.tagName.toLowerCase());
-        const inputType = await locator.evaluate(el => el.getAttribute("type") || "");
-
-        if (tagName === "select") {
-          const options = await locator.evaluate(el => {
-            return Array.from(el.options).map(o => ({ value: o.value, label: o.textContent.trim() }));
-          });
-          const strVal = String(value);
-          const match = options.find(o => o.label.toLowerCase() === strVal.toLowerCase() || o.value.toLowerCase() === strVal.toLowerCase());
-          if (match) {
-            await locator.selectOption({ value: match.value });
-          } else if (options.length > 1) {
-            await locator.selectOption({ index: 1 });
-          } else {
-            throw new Error(`No matching option for "${strVal}"`);
-          }
-        } else if (inputType === "date") {
-          await locator.fill(String(value));
-        } else if (inputType === "checkbox" || inputType === "radio") {
-          const checked = await locator.isChecked();
-          const shouldCheck = ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
-          if (checked !== shouldCheck) await locator.click({ force: true });
-        } else if (inputType === "file") {
-          await locator.setInputFiles(String(value));
+        const healed = await this.resolveSelector(session, { query: fieldName, action: "type" });
+        if (healed && healed.selector !== fieldInfo.selector) {
+          locator = session.page.locator(healed.selector).first();
+          fieldInfo.selector = healed.selector;
+          await locator.waitFor({ state: "visible", timeout: 3000 });
+          this.appendScratchpad(session, `  🩹 Self-healed selector for "${fieldName}": ${healed.selector}`);
         } else {
-          const isEditable = await locator.evaluate(el => !el.readOnly && !el.disabled);
-          if (isEditable) {
-            // Clear existing text first
-            await locator.fill("");
-
-            if (!isTurbo) {
-              // Human-like typing
-              await locator.click({ force: true }).catch(() => { });
-              await typeHumanoid(locator, String(value));
-              await new Promise(r => setTimeout(r, 150));
-            } else {
-              // Rapid fill
-              await locator.fill(String(value));
-            }
-
-            // Force trigger events
-            await locator.evaluate(el => {
-              ['input', 'change', 'blur'].forEach(ev => el.dispatchEvent(new Event(ev, { bubbles: true })));
-            });
-            this.appendScratchpad(session, `  ✓ ${query} = "${String(value).slice(0, 15)}..."`);
-          } else {
-            this.appendScratchpad(session, `  ⚠ ${query} is read-only, skipped.`);
-            throw new Error(`Field is readonly or disabled`);
-          }
+          return { success: false, error: `Field "${fieldName}" not visible` };
         }
-
-        results.push({ field: query, status: "filled", strategy: resolved.strategy });
-      } catch (err) {
-        results.push({ field: query, status: "failed", error: err.message });
+      } catch {
+        return { success: false, error: `Field "${fieldName}" not visible and self-healing failed` };
       }
     }
 
-    // Only settle once at the end
-    await this.waitForSettle(session, isTurbo ? "lazy" : "normal");
+    // Update overlay status
+    await session.page.evaluate((text) => {
+      const pill = document.getElementById('__mcpAgentPill');
+      if (pill) pill.innerHTML = `🤖 <span style="color: #4CC9F0">Filling:</span> ${text}`;
+    }, fieldName).catch(() => {});
 
-    this.logAction(session, { action: "fillForm", result: "success", metadata: { fieldCount: fieldEntries.length, turbo: isTurbo } });
-    session.actionHistory.push({ action: "fillForm", target: `${fieldEntries.length} fields`, timestamp: new Date().toISOString() });
+    // Detect element type
+    const inputType = await detectInputType(locator);
+    const tag = inputType.tag || fieldInfo.tag;
+    const type = inputType.type || fieldInfo.type || "";
 
-    return {
-      sessionId: session.id,
-      results,
-      filledCount: results.filter(r => r.status === "filled").length,
-      failedCount: results.filter(r => r.status === "failed").length
-    };
+    // ── Select elements ──────────────────────────────────────
+    if (tag === "select" || inputType.isSelect) {
+      const self = this;
+      const dropResult = await selectDropdown(session.page, locator, { label: String(value) }, {
+        onLog: (msg) => self.appendScratchpad(session, `    ${msg}`),
+        onMouseMove: async (x, y) => {
+          if (!isTurbo) await self.moveMouseNatural(session, { x, y });
+        },
+        onRipple: async (x, y) => {
+          if (!isTurbo) await self.showRipple(session, x, y);
+        }
+      });
+      return { success: dropResult.success, attempt: 1, strategy: dropResult.strategy };
+    }
+
+    // ── Checkbox / Radio ──────────────────────────────────────
+    if (inputType.isCheckbox || inputType.isRadio || type === "checkbox" || type === "radio") {
+      const shouldCheck = ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
+      const isChecked = await locator.isChecked().catch(() => false);
+      if (isChecked !== shouldCheck) {
+        if (!isTurbo) {
+          const box = await locator.boundingBox();
+          if (box) {
+            await this.moveMouseNatural(session, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+            await this.showRipple(session, box.x + box.width / 2, box.y + box.height / 2);
+          }
+        }
+        await locator.click({ force: true });
+      }
+      return { success: true, attempt: 1, strategy: "checkbox_toggle" };
+    }
+
+    // ── Text Inputs — Use Hybrid Input Engine ─────────────────
+    // Update overlay to show typing
+    await session.page.evaluate((text) => {
+      const pill = document.getElementById('__mcpAgentPill');
+      if (pill) pill.innerHTML = `🤖 <span style="color: #F72585">Typing:</span> ${text}`;
+    }, fieldName).catch(() => {});
+
+    const self = this;
+    const result = await fillInput(session.page, locator, String(value), {
+      turbo: isTurbo,
+      onLog: (msg) => self.appendScratchpad(session, `    ${msg}`),
+      onMouseMove: async (x, y) => {
+        if (!isTurbo) await self.moveMouseNatural(session, { x, y });
+      },
+      onRipple: async (x, y) => {
+        if (!isTurbo) await self.showRipple(session, x, y);
+      }
+    });
+
+    if (result.success) {
+      return { success: true, attempt: result.attempts, strategy: result.strategy };
+    }
+
+    // If the engine failed, try one more time with a re-resolved selector
+    this.appendScratchpad(session, `  🔄 Input engine failed, trying alternate selector for "${fieldName}"`);
+    try {
+      const altResolved = await this.resolveSelector(session, { query: fieldName, action: "type" });
+      if (altResolved && altResolved.selector !== fieldInfo.selector) {
+        const altLocator = session.page.locator(altResolved.selector).first();
+        if (await altLocator.isVisible().catch(() => false)) {
+          const retryResult = await fillInput(session.page, altLocator, String(value), {
+            turbo: isTurbo,
+            onLog: (msg) => self.appendScratchpad(session, `    [RETRY] ${msg}`)
+          });
+          if (retryResult.success) {
+            return { success: true, attempt: result.attempts + retryResult.attempts, strategy: `retry→${retryResult.strategy}` };
+          }
+        }
+      }
+    } catch { /* ignore retry failure */ }
+
+    return { success: false, error: `All input strategies failed. Last: ${result.strategy}`, attempt: result.attempts };
   }
 
   async screenshot({ sessionId, fileName, fullPage = false, embedImage = true, saveLocal = false, analyze = false, prompt = "" }) {
@@ -1836,10 +2053,23 @@ class BrowserService {
   async analyze({ sessionId }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
+    
     const summary = await this.analyzePageState(session);
-    this.logAction(session, { action: "analyze", result: "success", metadata: { url: summary.url } });
-    return { sessionId: session.id, ...summary };
+    
+    // Intelligent Label Enhancement (AI-assisted)
+    if (aiDecisionService.isAvailable() && summary.elements.length > 0) {
+      summary.elements = await aiDecisionService.enhanceElementLabels(summary.elements, summary.title);
+    }
+
+    this.logAction(session, { action: "analyze", result: "success", metadata: { url: summary.url, elementCount: summary.elements.length } });
+    
+    return { 
+      sessionId: session.id, 
+      ...summary,
+      tip: "AI TIP: You can now use these labels or selectors with browser_fill_form for reliable automation."
+    };
   }
+
 
   async extractElementStyles({ sessionId, selector, query, maxOuterHtml = 2000, maxTextLength = 200 }) {
     const session = this.getSession(sessionId);
@@ -1982,58 +2212,50 @@ class BrowserService {
       throw new Error("Missing selection target: value, label, or index");
     }
 
-    const resolved = await this.resolveSelector(session, { selector, query, action: "select" });
-    const locator = session.page.locator(resolved.selector).first();
-    const timeout = config.defaultTimeoutMs;
+    return this.withAgentLock(session, async () => {
+      const resolved = await this.resolveSelector(session, { selector, query, action: "select" });
+      const locator = session.page.locator(resolved.selector).first();
+      const timeout = config.defaultTimeoutMs;
 
-    await locator.waitFor({ state: "visible", timeout });
+      await locator.waitFor({ state: "visible", timeout });
 
-    const tagName = await locator.evaluate(el => el.tagName.toLowerCase());
-    const option = value !== undefined ? { value: String(value) } : label !== undefined ? { label: String(label) } : { index: Number(index) };
+      const option = value !== undefined ? { value: String(value) } : label !== undefined ? { label: String(label) } : { index: Number(index) };
 
-    if (tagName === "select") {
-      // Standard HTML Select
-      try {
-        await locator.selectOption(option, { timeout: 5000 });
-      } catch (err) {
-        // Fallback: If value was provided, try label
-        if (value !== undefined) {
-          try {
-            await locator.selectOption({ label: String(value) }, { timeout: 2000 });
-          } catch { throw err; }
-        } else { throw err; }
-      }
-    } else {
-      // Custom Dropdown (Div/Button based)
-      this.appendScratchpad(session, `  Dropdown is custom (${tagName}), attempting click-and-search...`);
-
-      // 1. Click to open
-      await locator.click({ timeout: 2000 });
-      await this.waitForSettle(session, "lazy");
-
-      // 2. Look for the option in the DOM
-      const searchText = label || value || "";
-      if (searchText) {
-        const optionLocator = session.page.locator(`text="${searchText}"`).first();
-        if (await optionLocator.isVisible()) {
-          await optionLocator.click({ timeout: 2000 });
-        } else {
-          // Try fuzzy search in likely dropdown containers
-          const fuzzyLocator = session.page.locator(`[role="option"], li, div`).filter({ hasText: searchText }).last();
-          await fuzzyLocator.click({ timeout: 2000 });
+      // ─── USE SMART DROPDOWN ENGINE ─────────────────────────
+      const self = this;
+      const result = await selectDropdown(session.page, locator, option, {
+        onLog: (msg) => self.appendScratchpad(session, `  ${msg}`),
+        onMouseMove: async (x, y) => {
+          if (!config.turboMode) await self.moveMouseNatural(session, { x, y });
+        },
+        onRipple: async (x, y) => {
+          if (!config.turboMode) await self.showRipple(session, x, y);
         }
-      } else if (index !== undefined) {
-        // Try to click the Nth child of the revealed container
-        throw new Error("Index-based selection not yet supported for custom dropdowns. Use 'label' or 'value'.");
+      });
+
+      await this.waitForSettle(session);
+
+      if (!result.success) {
+        this.appendScratchpad(session, `⚠ Dropdown selection failed for "${query || selector}"`);
+        throw new Error(`Could not select option ${JSON.stringify(option)} in "${query || selector}". Logs: ${result.logs.join(" | ")}`);
       }
-    }
 
-    await this.waitForSettle(session);
-    this.appendScratchpad(session, `Selected option in "${query || selector}": ${JSON.stringify(option)}`);
-    this.logAction(session, { action: "select", selector: resolved.selector, result: "success", metadata: { option } });
-    session.actionHistory.push({ action: "select", target: query || selector, timestamp: new Date().toISOString() });
+      this.appendScratchpad(session, `✅ Selected option in "${query || selector}" via ${result.strategy}`);
+      this.logAction(session, {
+        action: "select",
+        selector: resolved.selector,
+        result: "success",
+        metadata: { option, strategy: result.strategy, dropdownLogs: result.logs }
+      });
+      session.actionHistory.push({ action: "select", target: query || selector, timestamp: new Date().toISOString() });
 
-    return { sessionId: session.id, selector: resolved.selector, strategy: resolved.strategy, option };
+      return {
+        sessionId: session.id,
+        selector: resolved.selector,
+        strategy: `${resolved.strategy}→${result.strategy}`,
+        option
+      };
+    });
   }
 
   async generatePdf({ sessionId, fileName, format = "A4", landscape = false, printBackground = true }) {

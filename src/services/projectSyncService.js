@@ -34,6 +34,7 @@ const ROOT_DIR_ALLOWLIST = new Set([
   ".cursor",
   ".vscode",
   ".git",
+  ".mcp_data",
   "node_modules",
   "out",
   "src"
@@ -45,13 +46,22 @@ class ProjectSyncService {
   }
 
   get managedDirs() {
-    const base = path.resolve(this.rootDir, "src/.ai_outputs");
+    const dataBase = path.resolve(this.rootDir, process.env.MCP_DATA_DIR || "src/.ai_outputs");
+    const scratchpadBase = path.resolve(this.rootDir, config.scratchpadDir || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "ai_workspace"));
+    const mcpDataBase = path.resolve(this.rootDir, ".mcp_data");
     return [
-      base,
-      path.resolve(base, "screenshots"),
-      path.resolve(base, "downloads"),
-      path.resolve(base, "scratchpad"),
-      path.resolve(base, "user_data")
+      dataBase,
+      path.resolve(this.rootDir, config.screenshotDir),
+      path.resolve(this.rootDir, config.downloadsDir),
+      scratchpadBase,
+      path.resolve(scratchpadBase, "default"),
+      path.resolve(this.rootDir, config.userDataDir),
+      path.resolve(this.rootDir, config.logsDir),
+      // .mcp_data structure
+      mcpDataBase,
+      path.resolve(mcpDataBase, "temp"),
+      path.resolve(mcpDataBase, "logs"),
+      path.resolve(mcpDataBase, "screenshots")
     ];
   }
 
@@ -157,6 +167,52 @@ class ProjectSyncService {
     } catch {
       // Non-critical — don't crash startup
     }
+  }
+
+  /**
+   * Clean up all temporary files from .mcp_data/temp/.
+   * Called after each job completes or via the browser_cleanup_temp tool.
+   */
+  async cleanupTempFiles() {
+    const tempDir = path.resolve(this.rootDir, ".mcp_data", "temp");
+    const removed = [];
+
+    try {
+      await fs.mkdir(tempDir, { recursive: true });
+      const entries = await fs.readdir(tempDir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const fullPath = path.resolve(tempDir, entry.name);
+        try {
+          if (entry.isDirectory()) {
+            await fs.rm(fullPath, { recursive: true, force: true });
+          } else {
+            await fs.unlink(fullPath);
+          }
+          removed.push(entry.name);
+        } catch {
+          // skip individual failures
+        }
+      }
+
+      if (removed.length > 0) {
+        console.error(`[CLEANUP] Removed ${removed.length} temp file(s) from .mcp_data/temp/`);
+      }
+    } catch {
+      // Non-critical
+    }
+
+    return { removed, tempDir };
+  }
+
+  /**
+   * Get the path to the .mcp_data/temp/ directory.
+   * Ensures it exists before returning.
+   */
+  async getTempDir() {
+    const tempDir = path.resolve(this.rootDir, ".mcp_data", "temp");
+    await fs.mkdir(tempDir, { recursive: true });
+    return tempDir;
   }
 }
 

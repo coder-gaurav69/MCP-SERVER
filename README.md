@@ -48,7 +48,7 @@ node mcp.js browser_sessions
 - **Always reuse sessions**: Call `browser_sessions` before `browser_open`.
 - **Never guess selectors**: Call `browser_analyze` before any click/type to find valid targets.
 - **Prefer Batching**: Use `browser_fill_form` for multiple fields—it's 5x faster than repeated typing.
-- **Stay Clean**: Use `browser_scratchpad_write` for temp files. **Never** create files in the project root.
+- **Stay Clean**: Use `browser_scratchpad_write` with the right category (`scripts`, `tests`, `pages`, `artifacts`, `notes`, `tmp`) for generated files. **Never** create files in the project root.
 - **Verify Visually**: Set `embedImage: true` on screenshots and verify every action.
 
 ---
@@ -62,10 +62,10 @@ Copy `.env.example` to `.env` and configure:
 | `PORT` | `1000` | Dashboard & REST API port |
 | `HEADLESS` | `false` | Run browser in headless mode |
 | `DEFAULT_TIMEOUT_MS` | `10000` | Default timeout for actions |
-| `SCREENSHOT_DIR` | `.mcp_data/screenshots` | Screenshot storage |
+| `SCREENSHOT_DIR` | `src/.ai_outputs/screenshots` | Screenshot storage |
 | `GEMINI_API_KEY` | *(empty)* | Vision AI — get at [aistudio.google.com](https://aistudio.google.com) |
 | `FIGMA_API_TOKEN` | *(empty)* | Optional Figma integration |
-| `SCRATCHPAD_DIR` | `.mcp_data/scratchpad` | Isolated temp file directory |
+| `SCRATCHPAD_DIR` | `src/.ai_outputs/ai_workspace` | Isolated AI workspace for generated scripts, tests, pages, and drafts |
 
 ---
 

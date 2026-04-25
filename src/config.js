@@ -52,7 +52,7 @@ export const config = {
   figmaApiBaseUrl: process.env.FIGMA_API_BASE_URL || "https://api.figma.com/v1",
 
   // ─── Agent Scratchpad ────────────────────────────────────
-  scratchpadDir: process.env.SCRATCHPAD_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "scratchpad"),
+  scratchpadDir: process.env.SCRATCHPAD_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "ai_workspace"),
 
   // ─── Session Persistence ─────────────────────────────────
   /** When true, browser_open will reuse an existing session for the same domain instead of creating a new one. */
@@ -71,5 +71,12 @@ export const config = {
   /** Enable AI-powered self-healing selectors and NL→automation planning. */
   aiDecisionEnabled: toBoolean(process.env.AI_DECISION_ENABLED, true),
   /** Enable self-healing selectors (DOM heuristic + AI fallback). */
-  selfHealingEnabled: toBoolean(process.env.SELF_HEALING_ENABLED, true)
+  selfHealingEnabled: toBoolean(process.env.SELF_HEALING_ENABLED, true),
+
+  // ─── Web Search ──────────────────────────────────────────
+  searchMaxResults: Number(process.env.SEARCH_MAX_RESULTS || 10),
+  searchTimeoutMs: Number(process.env.SEARCH_TIMEOUT_MS || 15000),
+
+  // ─── MCP Data ───────────────────────────────────────────
+  mcpDataDir: process.env.MCP_DATA_DIR || ".mcp_data"
 };

@@ -19,6 +19,8 @@ import { browserService, setBrowserServiceWs } from "./services/browserService.j
 import { visionService } from "./services/visionService.js";
 import { scratchpadService } from "./services/scratchpadService.js";
 import { figmaService } from "./services/figmaService.js";
+import { figmaGeneratorService } from "./services/figmaGeneratorService.js";
+import { webSearchService } from "./services/webSearchService.js";
 import { projectSyncService } from "./services/projectSyncService.js";
 import { aiDecisionService } from "./services/aiDecisionService.js";
 import { queueService } from "./services/queueService.js";
@@ -151,12 +153,13 @@ export const registerAllTools = (serverInstance) => {
 
   tool(
     "browser_open",
-    `MANDATORY DEFAULT: Open a URL in the EXTERNAL headed browser for real-time user feedback. 
-Use this for EVERY URL-related task. The user wants to see the browser window move and act. 
-✨ AI BEST PRACTICE: 
-1. ALWAYS call browser_sessions first to check for existing sessions. 
-2. Set persist=true to keep cookies/logins. 
-3. If navigation fails, try increasing timeout with browser_wait before retrying.`,
+    `Open a URL in the EXTERNAL headed browser.
+⚠️ CRITICAL RULES:
+1. For the FIRST visit to a new website: use browser_open with the full URL.
+2. For navigating WITHIN the same website: DO NOT call browser_open with fabricated routes (e.g. /about, /services). The system will REJECT URLs that don't have a matching link on the current page.
+3. Instead, use browser_click with the visible link text (e.g. query="About" or query="Contact").
+4. After opening a page, check 'availableLinks' in the response to see what pages you can visit next.
+5. If you get status=link_not_found, it means that URL does not exist as a link on the page. Use browser_click instead.`,
     {
       sessionId: z.string().optional(),
       url: z.string(),
@@ -204,6 +207,71 @@ Use this for EVERY URL-related task. The user wants to see the browser window mo
       sessionId: z.string().describe("Session ID to reconnect")
     },
     ({ sessionId }) => browserService.reconnectSession({ sessionId })
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Smart Exploration ─────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "browser_explore_site",
+    `Smart site explorer. Discovers ALL real navigation links on the current page, then clicks each one (with visible mouse movement) and takes screenshots. Returns a map of all discovered pages.
+⚠️ USE THIS instead of manually calling browser_open repeatedly with guessed URLs.
+This tool does the work of exploring the entire site in one call.`,
+    {
+      sessionId: z.string().describe("Session ID from browser_open"),
+      screenshotEach: z.boolean().optional().default(true).describe("Take a screenshot of each page visited")
+    },
+    async ({ sessionId, screenshotEach }) => {
+      const session = browserService.getSession(sessionId);
+      if (!session) throw new Error("Session not found");
+
+      const links = await browserService.discoverNavLinks(session);
+      const internalLinks = links.filter(l => l.isInternal);
+      const visited = [];
+      const startUrl = session.page.url();
+
+      for (const link of internalLinks) {
+        try {
+          // Click using browser_click (humanoid movement)
+          await browserService.click({ sessionId, query: link.text });
+          await new Promise(r => setTimeout(r, 500));
+
+          const pageUrl = session.page.url();
+          const pageTitle = await session.page.title();
+          
+          let screenshotPath = null;
+          if (screenshotEach) {
+            const fileName = `explore-${link.text.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}.png`;
+            const result = await browserService.screenshot({ sessionId, saveLocal: true, fileName });
+            screenshotPath = result.path;
+          }
+          
+          visited.push({
+            linkText: link.text,
+            url: pageUrl,
+            title: pageTitle,
+            screenshot: screenshotPath,
+            status: "success"
+          });
+        } catch (err) {
+          visited.push({
+            linkText: link.text,
+            url: link.fullUrl,
+            status: "failed",
+            error: err.message
+          });
+        }
+      }
+
+      return {
+        sessionId,
+        startUrl,
+        pagesExplored: visited.length,
+        pages: visited,
+        allLinks: links
+      };
+    }
   );
 
   // ═══════════════════════════════════════════════════════════
@@ -747,13 +815,14 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
 
   tool(
     "browser_scratchpad_write",
-    `Write/create a file in the isolated scratchpad directory (.scratchpad/). Use this for ALL temporary files, test code, drafts, and experiments. These files NEVER appear in the user's project. The scratchpad is auto-cleaned when the session closes.`,
+    `Write/create a file in the isolated AI workspace. Use this for ALL generated scripts, tests, pages, drafts, and experiments. Never create temporary files in the project root.`,
     {
       sessionId: z.string(),
       filename: z.string().describe("Filename to create (e.g., 'test.html', 'draft.css', 'notes.md')"),
+      category: z.enum(["scripts", "tests", "pages", "artifacts", "notes", "tmp"]).optional().default("tmp").describe("Workspace folder for this file. Use scripts for automation code, tests for test files, pages for HTML previews, artifacts for generated outputs, notes for planning."),
       content: z.string().describe("File content to write")
     },
-    ({ sessionId, filename, content }) => scratchpadService.writeFile(sessionId, filename, content)
+    ({ sessionId, filename, category, content }) => scratchpadService.writeFile(sessionId, filename, content, category)
   );
 
   tool(
@@ -761,16 +830,20 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
     "Read a file from the scratchpad.",
     {
       sessionId: z.string(),
-      filename: z.string().describe("Filename to read")
+      filename: z.string().describe("Filename to read"),
+      category: z.enum(["scripts", "tests", "pages", "artifacts", "notes", "tmp"]).optional().default("tmp")
     },
-    ({ sessionId, filename }) => scratchpadService.readFile(sessionId, filename)
+    ({ sessionId, filename, category }) => scratchpadService.readFile(sessionId, filename, category)
   );
 
   tool(
     "browser_scratchpad_list",
     "List all files in the scratchpad for a session.",
-    { sessionId: z.string() },
-    ({ sessionId }) => scratchpadService.listFiles(sessionId)
+    {
+      sessionId: z.string(),
+      category: z.enum(["scripts", "tests", "pages", "artifacts", "notes", "tmp"]).optional()
+    },
+    ({ sessionId, category }) => scratchpadService.listFiles(sessionId, category)
   );
 
   tool(
@@ -778,9 +851,10 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
     "Delete a file from the scratchpad.",
     {
       sessionId: z.string(),
-      filename: z.string().describe("Filename to delete")
+      filename: z.string().describe("Filename to delete"),
+      category: z.enum(["scripts", "tests", "pages", "artifacts", "notes", "tmp"]).optional().default("tmp")
     },
-    ({ sessionId, filename }) => scratchpadService.deleteFile(sessionId, filename)
+    ({ sessionId, filename, category }) => scratchpadService.deleteFile(sessionId, filename, category)
   );
 
   tool(
@@ -788,13 +862,14 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
     `Serve a scratchpad HTML file via the local HTTP server and open it in the browser for visual testing. This lets you preview test pages without touching the user's project.`,
     {
       sessionId: z.string(),
-      filename: z.string().describe("HTML filename in the scratchpad to preview")
+      filename: z.string().describe("HTML filename in the scratchpad to preview"),
+      category: z.enum(["pages", "artifacts", "tmp"]).optional().default("pages")
     },
-    async ({ sessionId, filename }) => {
-      const previewUrl = scratchpadService.getPreviewUrl(sessionId, filename);
+    async ({ sessionId, filename, category }) => {
+      const previewUrl = scratchpadService.getPreviewUrl(sessionId, filename, category);
       // Open in the same session's browser
       const result = await browserService.openUrl({ sessionId, url: previewUrl });
-      return { ...result, previewUrl, filename };
+      return { ...result, previewUrl, filename, category };
     }
   );
 
@@ -993,6 +1068,87 @@ Run this tool before ANY interaction (click, type, fill_form) to discover valid 
       aiDecision: aiDecisionService.isAvailable(),
       sessions: browserService.getSessions()?.length || 0
     })
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Web Search & Content Extraction (FREE) ───────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "web_search",
+    `Search the web for information using DuckDuckGo (FREE, no API key needed). Returns titles, URLs, and snippets for the query. Use this to research topics, find documentation, or look up information.`,
+    {
+      query: z.string().describe("Search query (e.g. 'React form handling best practices')"),
+      maxResults: z.number().optional().default(10).describe("Maximum number of results to return")
+    },
+    ({ query, maxResults }) => webSearchService.search(query, maxResults)
+  );
+
+  tool(
+    "web_extract",
+    `Extract clean text content from a URL. Strips HTML, scripts, and styles. Returns title, description, clean text, and optionally structured data (headings, links, images). FREE, no API key needed.`,
+    {
+      url: z.string().describe("URL to extract content from"),
+      maxLength: z.number().optional().default(10000).describe("Maximum text length to return"),
+      structured: z.boolean().optional().default(false).describe("When true, also extracts headings, links, and images as structured data")
+    },
+    ({ url, maxLength, structured }) => webSearchService.extractContent(url, { maxLength, structured })
+  );
+
+  tool(
+    "web_search_extract",
+    `Search + Extract in one call: search the web, then fetch and parse the top N results. Returns enriched results with full page content. FREE, no API key needed.`,
+    {
+      query: z.string().describe("Search query"),
+      topN: z.number().optional().default(3).describe("How many top results to fetch full content from"),
+      maxContentLength: z.number().optional().default(3000).describe("Max content per page")
+    },
+    ({ query, topN, maxContentLength }) => webSearchService.searchAndExtract(query, topN, maxContentLength)
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Figma Design Generator (FREE, rule-based) ────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "figma_generate_design",
+    `Generate a Figma-compatible design layout from a page description. NO API key or paid service needed — uses rule-based generation. Detects page type (login, signup, dashboard) and generates a premium dark-mode design with proper tokens, layout nodes, and CSS implementation hints.`,
+    {
+      description: z.string().describe("Page description (e.g. 'login page', 'admin dashboard', 'signup form')"),
+      title: z.string().optional().describe("Custom page title override"),
+      subtitle: z.string().optional().describe("Custom subtitle override")
+    },
+    ({ description, title, subtitle }) => {
+      const result = figmaGeneratorService.generateDesign(description, { title, subtitle });
+      return {
+        ...result,
+        implementationTasks: figmaGeneratorService.toImplementationPlan(result.layout)
+      };
+    }
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // ─── Temp File Cleanup ────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+
+  tool(
+    "browser_cleanup_temp",
+    `Clean up temporary files from .mcp_data/temp/ and other AI-generated clutter. Call this after completing a job to keep the project clean.`,
+    {
+      cleanRoot: z.boolean().optional().default(true).describe("Also clean root directory clutter")
+    },
+    async ({ cleanRoot }) => {
+      const tempResult = await projectSyncService.cleanupTempFiles();
+      let rootResult = { removed: [] };
+      if (cleanRoot) {
+        rootResult = await projectSyncService.syncFix({ cleanupRootClutter: true });
+      }
+      return {
+        tempFilesRemoved: tempResult.removed,
+        rootFilesRemoved: rootResult.removedFiles || [],
+        status: "clean"
+      };
+    }
   );
 };
 

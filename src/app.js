@@ -93,20 +93,44 @@ export function createApp() {
         payload: failure("toolExecution", `Tool not found: ${toolName}`)
       };
     }
+
     const args = normalizeToolArgs(tool, rawArgs || {});
-    const result = await tool.handler(args);
-    return {
-      ok: true,
-      statusCode: 200,
-      payload: success(toolName, result)
-    };
+
+    // VALIDATION: Ensure the arguments match the tool's schema
+    try {
+      if (tool.schema) {
+        const schema = (tool.schema instanceof z.ZodType) ? tool.schema : z.object(tool.schema);
+        schema.parse(args);
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 400,
+        payload: failure("validation", error instanceof Error ? error.message : String(error))
+      };
+    }
+
+    try {
+      const result = await tool.handler(args);
+      return {
+        ok: true,
+        statusCode: 200,
+        payload: success(toolName, result)
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 500,
+        payload: failure(toolName, error instanceof Error ? error.message : String(error))
+      };
+    }
   };
 
   // ─── Scratchpad File Serving ─────────────────────────────
-  app.get("/scratchpad/:sessionId/:filename", async (req, res) => {
+  app.get("/scratchpad/:sessionId/:category/:filename", async (req, res) => {
     try {
-      const { sessionId, filename } = req.params;
-      const fileData = await scratchpadService.readFile(sessionId, filename);
+      const { sessionId, category, filename } = req.params;
+      const fileData = await scratchpadService.readFile(sessionId, filename, category);
 
       // Determine content type
       const ext = path.extname(filename).toLowerCase();
@@ -126,6 +150,26 @@ export function createApp() {
       };
       res.setHeader("Content-Type", contentTypes[ext] || "text/plain; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache");
+      res.send(fileData.content);
+    } catch (error) {
+      res.status(404).json(failure("scratchpad", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/scratchpad/:sessionId/:filename", async (req, res) => {
+    try {
+      const { sessionId, filename } = req.params;
+      const fileData = await scratchpadService.readFile(sessionId, filename, "pages");
+      const ext = path.extname(filename).toLowerCase();
+      const contentTypes = {
+        ".html": "text/html; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".js": "application/javascript",
+        ".json": "application/json",
+        ".txt": "text/plain; charset=utf-8",
+        ".md": "text/markdown; charset=utf-8"
+      };
+      res.setHeader("Content-Type", contentTypes[ext] || "text/plain; charset=utf-8");
       res.send(fileData.content);
     } catch (error) {
       res.status(404).json(failure("scratchpad", error instanceof Error ? error.message : String(error)));

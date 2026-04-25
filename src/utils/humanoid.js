@@ -38,7 +38,7 @@ export const moveMouseHumanoid = async (page, from, to, onStep = null) => {
   // 1. Calculate path with possible overshoot
   const shouldOvershoot = distance > 100 && Math.random() > 0.3;
   const overshootAmount = shouldOvershoot ? (Math.random() * 15 + 5) : 0;
-  
+
   // Vector for overshoot
   const angle = Math.atan2(to.y - from.y, to.x - from.x);
   const overshootTarget = {
@@ -59,12 +59,12 @@ export const moveMouseHumanoid = async (page, from, to, onStep = null) => {
   for (let i = 1; i <= steps; i++) {
     const rawT = i / steps;
     const t = shouldOvershoot ? easeOutBack(rawT) : easeInOutCubic(rawT);
-    
+
     const curX = getBezier(t, from.x, control.x, overshootTarget.x);
     const curY = getBezier(t, from.y, control.y, overshootTarget.y);
-    
+
     await page.mouse.move(curX, curY);
-    if (onStep) await onStep(curX, curY).catch(() => {});
+    if (onStep) await onStep(curX, curY).catch(() => { });
 
     // Micro-pauses and jitter
     if (i % 7 === 0) {
@@ -81,7 +81,7 @@ export const moveMouseHumanoid = async (page, from, to, onStep = null) => {
       const curX = currentPos.x + (to.x - currentPos.x) * easeInOutCubic(t);
       const curY = currentPos.y + (to.y - currentPos.y) * easeInOutCubic(t);
       await page.mouse.move(curX, curY);
-      if (onStep) await onStep(curX, curY).catch(() => {});
+      if (onStep) await onStep(curX, curY).catch(() => { });
       await new Promise(r => setTimeout(r, Math.random() * 20 + 10));
     }
   }
@@ -97,35 +97,62 @@ export const hoverHumanoid = async (page, pos, onStep = null) => {
     const ox = (Math.random() - 0.5) * radius;
     const oy = (Math.random() - 0.5) * radius;
     await page.mouse.move(pos.x + ox, pos.y + oy);
-    if (onStep) await onStep(pos.x + ox, pos.y + oy).catch(() => {});
+    if (onStep) await onStep(pos.x + ox, pos.y + oy).catch(() => { });
     await new Promise(r => setTimeout(r, Math.random() * 100 + 50));
   }
 };
 
 /**
  * Types text with mistakes and corrections.
+ * @param {Object} locator - Playwright locator
+ * @param {string} text - Text to type
+ * @param {Function} onStep - Optional callback for each character (e.g. for mouse jitter)
  */
-export const typeHumanoid = async (locator, text) => {
-  const keyboard = locator.page().keyboard;
+export const typeHumanoid = async (locator, text, onStep = null) => {
+  const page = locator.page();
+  const keyboard = page.keyboard;
+  
+  // Ensure focus is solid before typing
+  await locator.focus().catch(() => {});
+  
+  // Get field position for natural jitter during typing
+  let fieldBox = null;
+  try {
+    fieldBox = await locator.boundingBox();
+  } catch { /* ignore */ }
   
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
     
     // Random "typo" simulation
-    if (Math.random() > 0.96 && i > 0) {
+    if (Math.random() > 0.98 && i > 0) {
       const typos = "qwertyuiopasdfghjklzxcvbnm";
       const typo = typos[Math.floor(Math.random() * typos.length)];
-      await locator.pressSequentially(typo, { delay: Math.random() * 40 + 20 });
-      await new Promise(r => setTimeout(r, Math.random() * 200 + 100)); // Pause after mistake
-      await locator.press("Backspace");
-      await new Promise(r => setTimeout(r, Math.random() * 150 + 50)); // Pause after correction
+      await keyboard.type(typo, { delay: Math.random() * 20 + 10 });
+      await new Promise(r => setTimeout(r, Math.random() * 150 + 50));
+      await keyboard.press("Backspace");
+      await new Promise(r => setTimeout(r, Math.random() * 100 + 50));
     }
 
-    await locator.pressSequentially(char, { delay: 0 });
+    await keyboard.type(char);
+    
+    // Natural mouse jitter while typing (stays near field)
+    if (fieldBox && Math.random() > 0.7) {
+      const jitterX = fieldBox.x + fieldBox.width / 2 + (Math.random() - 0.5) * 8;
+      const jitterY = fieldBox.y + fieldBox.height / 2 + (Math.random() - 0.5) * 8;
+      await page.mouse.move(jitterX, jitterY).catch(() => {});
+      
+      // Update ghost cursor
+      await page.evaluate(({ x, y }) => {
+        if (window.__mcpUpdateGhostCursor) window.__mcpUpdateGhostCursor(x, y);
+      }, { x: jitterX, y: jitterY }).catch(() => {});
+    }
+    
+    if (onStep) await onStep().catch(() => {});
     
     // Variance in typing speed
-    const baseDelay = Math.random() * 60 + 20;
-    const pause = Math.random() > 0.92 ? Math.random() * 300 + 100 : 0;
+    const baseDelay = Math.random() * 40 + 10;
+    const pause = Math.random() > 0.94 ? Math.random() * 200 + 50 : 0;
     await new Promise(r => setTimeout(r, baseDelay + pause));
   }
 };

@@ -5,6 +5,7 @@ downloads/
 user_data/
 .scratchpad/
 .mcp_data/
+src/.ai_outputs/
 *.vsix
 *.ps1
 *.log
