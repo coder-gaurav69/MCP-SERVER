@@ -27,11 +27,11 @@ export const config = {
   // Typical values: 1, 0.9, 0.8, 1.25, 1.5
   // NOTE: keep empty by default; only use if explicitly set (mostly useful for headless consistency).
   browserScaleFactor: process.env.BROWSER_SCALE_FACTOR ? Number(process.env.BROWSER_SCALE_FACTOR) : null,
-  screenshotDir: process.env.SCREENSHOT_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "screenshots"),
+  screenshotDir: process.env.SCREENSHOT_DIR || path.join(process.env.MCP_DATA_DIR || ".mcp_data", "screenshots"),
   /** When true, screenshots are stored under screenshots/<sessionId>/ and removed entirely on cleanup. */
   sessionScreenshotSubdirs: toBoolean(process.env.SESSION_SCREENSHOT_SUBDIRS, true),
-  downloadsDir: process.env.DOWNLOADS_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "downloads"),
-  userDataDir: process.env.USER_DATA_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "user_data"),
+  downloadsDir: process.env.DOWNLOADS_DIR || path.join(process.env.MCP_DATA_DIR || ".mcp_data", "downloads"),
+  userDataDir: process.env.USER_DATA_DIR || path.join(process.env.MCP_DATA_DIR || ".mcp_data", "user_data"),
   autoCleanup: toBoolean(process.env.AUTO_CLEANUP, false),
   defaultViewport: {
     width: Number(process.env.VIEWPORT_WIDTH || 1920),
@@ -52,7 +52,7 @@ export const config = {
   figmaApiBaseUrl: process.env.FIGMA_API_BASE_URL || "https://api.figma.com/v1",
 
   // ─── Agent Scratchpad ────────────────────────────────────
-  scratchpadDir: process.env.SCRATCHPAD_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "ai_workspace"),
+  scratchpadDir: process.env.SCRATCHPAD_DIR || path.join(process.env.MCP_DATA_DIR || ".mcp_data", "ai_workspace"),
 
   // ─── Session Persistence ─────────────────────────────────
   /** When true, browser_open will reuse an existing session for the same domain instead of creating a new one. */
@@ -65,7 +65,7 @@ export const config = {
   workerConcurrency: Number(process.env.WORKER_CONCURRENCY || 2),
 
   // ─── Logging ────────────────────────────────────────────
-  logsDir: process.env.LOGS_DIR || path.join(process.env.MCP_DATA_DIR || "src/.ai_outputs", "logs"),
+  logsDir: process.env.LOGS_DIR || path.join(process.env.MCP_DATA_DIR || ".mcp_data", "logs"),
 
   // ─── AI Decision Layer ──────────────────────────────────
   /** Enable AI-powered self-healing selectors and NL→automation planning. */
@@ -73,9 +73,31 @@ export const config = {
   /** Enable self-healing selectors (DOM heuristic + AI fallback). */
   selfHealingEnabled: toBoolean(process.env.SELF_HEALING_ENABLED, true),
 
+  // Free API intelligence layer (DOM first, API fallback only when confidence is low).
+  aiServiceEnabled: toBoolean(process.env.AI_SERVICE_ENABLED, true),
+  aiDomConfidenceThreshold: Number(process.env.AI_DOM_CONFIDENCE_THRESHOLD || 0.82),
+  aiOcrConfidenceThreshold: Number(process.env.AI_OCR_CONFIDENCE_THRESHOLD || 0.74),
+  aiVisionConfidenceThreshold: Number(process.env.AI_VISION_CONFIDENCE_THRESHOLD || 0.72),
+  aiCacheTtlMs: Number(process.env.AI_CACHE_TTL_MS || 30 * 60 * 1000),
+  aiTempDir: process.env.AI_TEMP_DIR || path.join(process.env.MCP_DATA_DIR || ".mcp_data", "temp"),
+  ocrSpaceApiKey: process.env.OCR_SPACE_API_KEY || "helloworld",
+  ocrSpaceApiUrl: process.env.OCR_SPACE_API_URL || "https://api.ocr.space/parse/image",
+  huggingFaceApiKey: process.env.HUGGINGFACE_API_KEY || process.env.HF_API_TOKEN || "",
+  huggingFaceVisionModel: process.env.HUGGINGFACE_VISION_MODEL || "Salesforce/blip-image-captioning-large",
+  groqApiKey: process.env.GROQ_API_KEY || "",
+  groqModel: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+
   // ─── Web Search ──────────────────────────────────────────
   searchMaxResults: Number(process.env.SEARCH_MAX_RESULTS || 10),
   searchTimeoutMs: Number(process.env.SEARCH_TIMEOUT_MS || 15000),
+
+  // ─── OpenCV Vision ───────────────────────────────────────
+  opencvEnabled: toBoolean(process.env.OPENCV_ENABLED, true),
+  opencvDebugEnabled: toBoolean(process.env.OPENCV_DEBUG, true),
+  opencvBlurKernel: Number(process.env.OPENCV_BLUR_KERNEL || 5),
+  opencvThreshold: Number(process.env.OPENCV_THRESHOLD || 127),
+  opencvMaxThreshold: Number(process.env.OPENCV_MAX_THRESHOLD || 255),
+  opencvMinRegionArea: Number(process.env.OPENCV_MIN_REGION_AREA || 1000),
 
   // ─── MCP Data ───────────────────────────────────────────
   mcpDataDir: process.env.MCP_DATA_DIR || ".mcp_data"

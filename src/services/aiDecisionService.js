@@ -99,44 +99,105 @@ class AiDecisionService {
       ? `\nPage: "${context.pageTitle || 'unknown'}" at ${context.url || 'unknown'}\nVisible elements:\n${JSON.stringify(context.interactiveElements?.slice(0, 30), null, 2)}`
       : "";
 
-    const prompt = `You are a browser automation expert. Convert this natural language goal into a sequence of browser automation tool calls.
-
+    const prompt = `You are a browser automation expert. Convert this natural language goal into a DIRECTED ACYCLIC GRAPH (DAG) of automation tasks.
+    
 GOAL: "${goal}"
 ${contextStr}
 
 Available tools:
-- browser_open: { url: string } — Navigate to URL
-- browser_click: { sessionId: string, selector?: string, query?: string } — Click element
-- browser_type: { sessionId: string, selector?: string, query?: string, text: string } — Type text
-- browser_fill_form: { sessionId: string, fields: { "field query": "value", ... } } — Fill form (PREFERRED for multiple fields)
-- browser_select: { sessionId: string, query: string, label: string } — Select dropdown option
-- browser_scroll: { sessionId: string, pixels: number } — Scroll page
-- browser_wait: { sessionId: string, text?: string, timeoutMs?: number } — Wait for element/text
-- browser_press_key: { sessionId: string, key: string } — Press keyboard key
-- browser_screenshot: { sessionId: string } — Take screenshot to verify
+- browser_open: { url: string }
+- browser_click: { selector?: string, query?: string }
+- browser_type: { selector?: string, query?: string, text: string }
+- browser_fill_form: { fields: { "field query": "value", ... } }
+- browser_select: { query: string, label: string }
+- browser_scroll: { pixels: number }
+- browser_wait: { text?: string, timeoutMs?: number }
+- browser_press_key: { key: string }
+- browser_screenshot: {}
 
 Rules:
-1. Use browser_fill_form when filling multiple fields (NOT repeated browser_type calls)
-2. Always end with browser_screenshot to verify the result
-3. Use natural language queries for selectors (e.g. "email field", "login button")
-4. Extract any credentials/values from the goal text
+1. Return a list of tasks with unique IDs.
+2. Specify "dependencies" for each task (IDs that must finish before this task).
+3. Independent tasks (e.g., filling different form fields) should have NO dependencies on each other so they can run in parallel.
+4. Use browser_fill_form for multiple fields.
+5. Always end with a screenshot verification task.
 
 Respond in JSON only:
 {
-  "steps": [
-    { "tool": "browser_fill_form", "params": { "sessionId": "auto", "fields": { "email field": "test@test.com" } } }
-  ],
-  "reasoning": "Brief explanation of the plan"
+  "reasoning": "Brief explanation",
+  "tasks": [
+    { "id": "t1", "tool": "browser_open", "params": { "url": "..." }, "dependencies": [] },
+    { "id": "t2", "tool": "browser_fill_form", "params": { "fields": { "email": "..." } }, "dependencies": ["t1"] }
+  ]
 }`;
 
     try {
       const raw = await this._prompt(prompt);
       const parsed = this._parseJson(raw);
-      log.info("Plan generated", { stepCount: parsed.steps?.length });
+      log.info("Task graph generated", { taskCount: parsed.tasks?.length });
+      
+      // Post-process: ensure params is an object and add sessionId if missing
+      parsed.tasks = (parsed.tasks || []).map(t => ({
+        ...t,
+        params: { sessionId: "auto", ...(t.params || {}) }
+      }));
+
       return parsed;
     } catch (err) {
       log.error("planFromGoal failed", { goal, error: err.message });
       throw new Error(`AI planning failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Analyze a page and build a structured form plan.
+   * @param {string} url
+   * @param {Array} elements - From analyzePageState
+   * @returns {{ fields: Array<{label: string, selector: string, value: string}> }}
+   */
+  async generateFormPlan(url, elements, userGoal = "") {
+    this._ensureAvailable();
+    log.info("Generating form plan", { url, elementCount: elements.length });
+
+    const fields = elements
+      .filter(f => ['input', 'select', 'textarea'].includes(f.tag))
+      .map(f => ({
+        label: f.label || f.placeholder || f.name || "unknown",
+        selector: f.selector,
+        tag: f.tag,
+        type: f.type,
+        options: f.options
+      }))
+      .slice(0, 40);
+
+    const prompt = `You are a form analysis expert. Create a structured filling plan for this form based on the user's goal.
+
+GOAL: "${userGoal || 'Fill the form completely'}"
+URL: ${url}
+
+FIELDS:
+${JSON.stringify(fields, null, 2)}
+
+Respond in JSON only:
+{
+  "fields": [
+    { "label": "Email", "selector": "...", "value": "test@example.com", "strategy": "type" },
+    ...
+  ],
+  "reasoning": "Brief explanation"
+}
+
+Rules:
+1. Generate realistic values for each field.
+2. If multiple strategies are possible, specify the best one.
+3. Only include fields relevant to the goal.`;
+
+    try {
+      const raw = await this._prompt(prompt);
+      return this._parseJson(raw);
+    } catch (err) {
+      log.error("generateFormPlan failed", { url, error: err.message });
+      throw new Error(`Form planning failed: ${err.message}`);
     }
   }
 

@@ -264,6 +264,25 @@ class FigmaService {
       verificationChecklist
     };
   }
+
+  async createDesignFromSchema({ fileKeyOrUrl, schema }) {
+    this.ensureConfigured();
+    const fileKey = this.parseFileKey(fileKeyOrUrl);
+    
+    const nodes = (schema.components || []).map(comp => ({
+      name: comp.label || comp.type,
+      type: "FRAME",
+      layoutMode: comp.type === "grid" ? "HORIZONTAL" : "VERTICAL"
+    }));
+
+    return {
+      status: "success",
+      message: "Design nodes prepared from schema",
+      fileKey,
+      nodeCount: nodes.length,
+      nodes
+    };
+  }
 }
 
 export const figmaService = new FigmaService();

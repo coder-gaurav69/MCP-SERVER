@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { opencvService } from "./opencvService.js";
 
 /**
  * Vision Analysis Service — Uses Google Gemini Flash (free tier) to give the AI agent "eyes".
@@ -41,7 +42,10 @@ class VisionService {
   async analyzeScreenshot(imageBuffer, prompt) {
     this._ensureAvailable();
 
-    const base64 = imageBuffer.toString("base64");
+    // MANDATORY OPENCV PIPELINE
+    const { croppedBuffer, mainArea, regions } = await opencvService.processScreenshot(imageBuffer);
+    
+    const base64 = croppedBuffer.toString("base64");
 
     const body = {
       contents: [
@@ -54,7 +58,10 @@ class VisionService {
               }
             },
             {
-              text: prompt || "Analyze this screenshot in detail. Identify all form fields, their labels, and their interactive states. Describe the layout, colors, and any visual feedback elements like ripples or overlays. If there are input fields, estimate their locations relative to their labels."
+              text: prompt || `Analyze this cropped UI section in detail. 
+              Region coordinates: ${JSON.stringify(mainArea)}
+              Detected visual sub-regions: ${regions.length}
+              Identify all form fields, their labels, and their interactive states. Describe the layout, colors, and any visual feedback elements like ripples or overlays. If there are input fields, estimate their locations relative to their labels.`
             }
           ]
         }

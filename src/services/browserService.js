@@ -7,10 +7,20 @@ import { agentActivityService } from "./agentActivityService.js";
 import { visionService } from "./visionService.js";
 import { moveMouseHumanoid, typeHumanoid } from "../utils/humanoid.js";
 import { selfHealingSelector } from "./selfHealingSelector.js";
+import { adapterService } from "./adapterService.js";
 import { sessionStore } from "./sessionStore.js";
 import { createServiceLogger, logAction as logStructuredAction } from "./loggerService.js";
 import { fillInput, selectDropdown, detectInputType } from "./inputEngine.js";
 import { aiDecisionService } from "./aiDecisionService.js";
+import { aiService } from "./aiService.js";
+import { opencvService } from "./opencvService.js";
+import { memoryService } from "./memoryService.js";
+import { learningService } from "./learningService.js";
+import { graphExecutor } from "./graphExecutor.js";
+import { knowledgeBaseService } from "./knowledgeBaseService.js";
+import { networkInterceptor } from "./networkInterceptor.js";
+import { instructionMemoryService } from "./instructionMemoryService.js";
+import { schedulerService } from "./schedulerService.js";
 
 const svcLog = createServiceLogger("browser-service");
 
@@ -316,6 +326,7 @@ class BrowserService {
     };
 
     await this.injectInteractionMonitor(session);
+    await networkInterceptor.attach(session);
 
     page.on("console", (msg) => {
       if (msg.type() === "error") {
@@ -1278,7 +1289,10 @@ class BrowserService {
   }
 
   async analyzePageState(session) {
-    return session.page.evaluate(() => {
+    const buffer = await session.page.screenshot({ fullPage: false });
+    const vision = await opencvService.processScreenshot(buffer);
+
+    const summary = await session.page.evaluate(() => {
       const firstText = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 50);
       const isVisible = (el) => {
         const style = window.getComputedStyle(el);
@@ -1359,7 +1373,18 @@ class BrowserService {
             placeholder: el.getAttribute("placeholder") || undefined,
             aria: el.getAttribute("aria-label") || undefined,
             required: el.hasAttribute("required") || undefined,
-            value: (el.value !== undefined && tagName !== 'select') ? String(el.value).slice(0, 100) : undefined
+            role: el.getAttribute("role") || undefined,
+            semanticRole: this._inferSemanticRole(el, label, tagName),
+            value: (el.value !== undefined && tagName !== 'select') ? String(el.value).slice(0, 100) : undefined,
+            box: (() => {
+              const r = el.getBoundingClientRect();
+              return {
+                x: Math.round(r.x),
+                y: Math.round(r.y),
+                width: Math.round(r.width),
+                height: Math.round(r.height)
+              };
+            })()
           };
 
           if (tagName === 'select') {
@@ -1394,14 +1419,81 @@ class BrowserService {
         };
       });
 
+      // 3. Layout Discovery (Cards, Sections)
+      const layout = [];
+      const containers = Array.from(document.querySelectorAll('section, article, [class*="card"], [class*="container"], [id*="card"], [id*="container"]'))
+        .filter(isVisible)
+        .slice(0, 50);
+
+      containers.forEach((container, idx) => {
+        const rect = container.getBoundingClientRect();
+        const header = container.querySelector('h1, h2, h3, h4, h5, h6, [class*="header"], [class*="title"]');
+        
+        layout.push({
+          type: "container",
+          id: container.id || `container-${idx}`,
+          label: header ? (header.innerText || header.textContent || "").trim().slice(0, 50) : undefined,
+          tag: container.tagName.toLowerCase(),
+          className: container.className.slice(0, 100),
+          box: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          }
+        });
+      });
+
       return {
         title: document.title,
         url: window.location.href,
         interactiveCount: interactive.length,
         forms: formElements,
+        layout,
         elements: interactive
       };
     });
+
+    // Map visual regions to DOM elements
+    summary.elements = opencvService.mapRegionsToDom(vision.regions, summary.elements);
+    summary.vision = {
+      mainArea: vision.mainArea,
+      regionCount: vision.regions.length,
+      debugPath: vision.debugPath
+    };
+
+    // 4. Apply Domain Adapter
+    const adapter = await adapterService.getAdapter(session.page.url());
+    summary.domainMetadata = await adapter.extract(session.page);
+
+    return summary;
+  }
+
+  _inferSemanticRole(el, label, tag) {
+    const text = (label || el.innerText || el.textContent || "").toLowerCase();
+    const type = el.getAttribute("type") || "";
+    
+    if (tag === "button" || el.getAttribute("role") === "button") {
+      if (text.includes("login") || text.includes("sign in")) return "login_button";
+      if (text.includes("submit") || text.includes("send")) return "submit_button";
+      if (text.includes("cancel") || text.includes("close")) return "cancel_button";
+      return "action_button";
+    }
+    
+    if (tag === "input" || tag === "textarea") {
+      if (type === "email" || text.includes("email")) return "email_input";
+      if (type === "password" || text.includes("password")) return "password_input";
+      if (text.includes("search")) return "search_input";
+      return "text_input";
+    }
+    
+    if (tag === "a") {
+      if (text.includes("home")) return "home_link";
+      if (text.includes("contact")) return "contact_link";
+      return "nav_link";
+    }
+    
+    return "unknown";
   }
 
   /**
@@ -1695,47 +1787,62 @@ class BrowserService {
     });
   }
 
-  async click({ sessionId, selector, query }) {
+  async click({ sessionId, selector, query, settlePolicy }) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
+
     return this.withAgentLock(session, async () => {
-      const resolved = await this.resolveSelector(session, { selector, query, action: "click" });
+      const url = session.page.url();
+      let targetSelector = selector;
 
-      const locator = session.page.locator(resolved.selector).first();
-      await locator.waitFor({ state: "visible", timeout: config.defaultTimeoutMs });
+      if (query && !selector) {
+        const remembered = await memoryService.getBestSelector(url, query);
+        if (remembered) targetSelector = remembered;
+      }
 
-      if (!config.turboMode) {
-        const box = await locator.boundingBox();
-        if (box) {
-          const centerX = box.x + box.width / 2;
-          const centerY = box.y + box.height / 2;
-          await this.moveMouseNatural(session, { x: centerX, y: centerY });
-          await this.showRipple(session, centerX, centerY);
-          await new Promise(r => setTimeout(r, 100));
+      const resolved = await this.resolveSelector(session, { selector: targetSelector, query, action: "click" });
+      const finalSelector = resolved.selector;
+      const locator = session.page.locator(finalSelector).first();
+
+      const strategies = [
+        { name: "normal", fn: async (loc) => loc.click({ timeout: 5000 }) },
+        { name: "force", fn: async (loc) => loc.click({ force: true, timeout: 5000 }) },
+        { name: "js", fn: async (loc) => loc.evaluate(el => el.click()) },
+        { name: "coordinate", fn: async (loc) => {
+            const box = await loc.boundingBox();
+            if (!box) throw new Error("No bounding box");
+            const cx = box.x + box.width / 2;
+            const cy = box.y + box.height / 2;
+            await this.moveMouseNatural(session, { x: cx, y: cy });
+            await session.page.mouse.click(cx, cy);
+          }
+        }
+      ];
+
+      let lastError = null;
+      let successfulStrategy = null;
+
+      for (const strategy of strategies) {
+        try {
+          await strategy.fn(locator);
+          successfulStrategy = strategy.name;
+          break;
+        } catch (err) {
+          lastError = err;
+          svcLog.debug(`Click strategy "${strategy.name}" failed: ${err.message}`);
         }
       }
 
-      try {
-        await locator.click({ timeout: config.defaultTimeoutMs });
-      } catch (err) {
-        if (err.message.includes("intercepts pointer events") || err.message.includes("is not stable")) {
-          this.appendScratchpad(session, `  ⚠ Click intercepted, retrying with force:true...`);
-          await locator.click({ timeout: config.defaultTimeoutMs, force: true });
-        } else {
-          throw err;
-        }
+      if (successfulStrategy) {
+        if (query) await memoryService.recordResult(url, query, finalSelector, true);
+        await this.waitForSettle(session, settlePolicy);
+        this.appendScratchpad(session, `Clicked: "${query || selector}" via ${successfulStrategy}`);
+        return { result: "success", selector: finalSelector, strategy: successfulStrategy };
+      } else {
+        if (query) await memoryService.recordResult(url, query, finalSelector, false, lastError.message);
+        await learningService.logFailure(url, "click", { selector, query }, lastError);
+        throw new Error(`All click strategies failed: ${lastError.message}`);
       }
-
-      await this.waitForSettle(session);
-      this.appendScratchpad(session, `Clicked: "${query || selector}" → ${resolved.strategy}`);
-      this.logAction(session, { action: "click", selector: resolved.selector, result: "success", metadata: { query, strategy: resolved.strategy } });
-      session.actionHistory.push({ action: "click", target: query || selector, timestamp: new Date().toISOString() });
-
-      return {
-        sessionId: session.id,
-        selector: resolved.selector,
-        strategy: resolved.strategy
-      };
     });
   }
 
@@ -1743,64 +1850,236 @@ class BrowserService {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Session not found");
     return this.withAgentLock(session, async () => {
-      const resolved = await this.resolveSelector(session, { selector, query, action: "type" });
+      const url = session.page.url();
+      let targetSelector = selector;
+
+      if (query && !selector) {
+        const remembered = await memoryService.getBestSelector(url, query);
+        if (remembered) targetSelector = remembered;
+      }
+
+      const resolved = await this.resolveSelector(session, { selector: targetSelector, query, action: "type" });
 
       // Handle focus-based typing
       if (resolved.strategy === "focus") {
-        this.appendScratchpad(session, `Typing into focused element: "${String(text).slice(0, 20)}..."`);
         await session.page.keyboard.type(String(text), { delay: config.turboMode ? 0 : 30 });
-        return { sessionId: session.id, strategy: "focus", typedLength: text.length };
+        return { sessionId: session.id, strategy: "focus", typedLength: String(text).length };
       }
 
       const locator = session.page.locator(resolved.selector).first();
-      await locator.waitFor({ state: "visible", timeout: 8000 });
-
-      // ─── USE HYBRID INPUT ENGINE ─────────────────────────────
-      const self = this;
-      const result = await fillInput(session.page, locator, String(text), {
-        turbo: config.turboMode,
-        onLog: (msg) => self.appendScratchpad(session, `  ${msg}`),
-        onMouseMove: async (x, y) => {
-          if (!config.turboMode) await self.moveMouseNatural(session, { x, y });
-        },
-        onRipple: async (x, y) => {
-          if (!config.turboMode) await self.showRipple(session, x, y);
-        }
+      const result = await fillInput(session.page, locator, text, {
+        onMouseMove: (x, y) => this.moveMouseNatural(session, { x, y }),
+        onRipple: (x, y) => this.showRipple(session, x, y)
       });
 
-      await this.waitForSettle(session);
-
-      const logMsg = result.success
-        ? `✅ Typed into "${query || selector}" via ${result.strategy} (${result.attempts} attempt(s))`
-        : `⚠ Typing into "${query || selector}" may have failed (strategy: ${result.strategy})`;
-      this.appendScratchpad(session, logMsg);
-
-      this.logAction(session, {
-        action: "type",
-        selector: resolved.selector,
-        result: result.success ? "success" : "partial",
-        metadata: {
-          query,
-          strategy: result.strategy,
-          resolveStrategy: resolved.strategy,
-          textLength: text.length,
-          attempts: result.attempts,
-          verified: result.verification?.verified,
-          inputEngineLogs: result.logs
-        }
-      });
-      session.actionHistory.push({ action: "type", target: query || selector, timestamp: new Date().toISOString() });
-
-      return {
-        sessionId: session.id,
-        selector: resolved.selector,
-        strategy: `${resolved.strategy}→${result.strategy}`,
-        typedLength: text.length,
-        verified: result.verification?.verified ?? false,
-        inputMethod: result.strategy,
-        attempts: result.attempts
-      };
+      if (result.success) {
+        if (query) await memoryService.recordResult(url, query, resolved.selector, true);
+        return { result: "success", selector: resolved.selector, strategy: result.strategy };
+      } else {
+        if (query) await memoryService.recordResult(url, query, resolved.selector, false, "Input verification failed");
+        await learningService.logFailure(url, "type", { selector, query, text }, "Input verification failed");
+        throw new Error(`Failed to type text: ${result.logs.join(" | ")}`);
+      }
     });
+  }
+
+  async executeAutonomousGoal({ sessionId, goal }) {
+    const session = await this.getOrCreateSession(sessionId);
+    const startUrl = session.page.url();
+    svcLog.info("Starting autonomous goal (Graph)", { goal, sessionId: session.id, startUrl });
+
+    // 1. Try Replay first (Linear)
+    const replayActions = await replayService.findReplay(startUrl, goal);
+    if (replayActions) {
+      svcLog.info("Replay found! Executing recorded actions...");
+      const results = [];
+      for (const action of replayActions) {
+        const res = await this.dispatchAction(session, action.tool, action.params);
+        results.push({ step: action.tool, status: "replay", result: res });
+      }
+      return { goal, status: "completed", strategy: "replay", results };
+    }
+
+    let iteration = 0;
+    const maxIterations = 5;
+    const allResults = {};
+
+    while (iteration < maxIterations) {
+      iteration++;
+      const pageInfo = await this.analyzePageState(session);
+      
+      const plan = await aiDecisionService.planFromGoal(goal, {
+        url: pageInfo.url,
+        pageTitle: pageInfo.title,
+        interactiveElements: pageInfo.elements
+      });
+
+      svcLog.info(`Iteration ${iteration}: executing graph with ${plan.tasks.length} tasks`);
+
+      try {
+        const graphResults = await graphExecutor.execute(session, plan, this.dispatchAction.bind(this));
+        Object.assign(allResults, graphResults);
+        
+        // Record success if all tasks in the graph succeeded
+        const recordedActions = plan.tasks.map(t => ({
+          tool: t.tool,
+          params: t.params,
+          url: pageInfo.url
+        }));
+        await replayService.recordSession(session.id, goal, recordedActions);
+        
+        break; 
+      } catch (err) {
+        svcLog.error(`Graph execution failed at iteration ${iteration}`, { error: err.message });
+        // Handle recovery or next iteration
+        await this.waitForSettle(session, "lazy");
+      }
+    }
+
+    return { goal, status: "completed", iterations: iteration, results: allResults };
+  }
+
+  async dispatchAction(session, tool, params) {
+    const sid = params.sessionId === "auto" ? session.id : params.sessionId || session.id;
+    const p = { ...params, sessionId: sid };
+    
+    switch (tool) {
+      case "browser_open": return this.openUrl(p);
+      case "browser_click": return this.click(p);
+      case "browser_type": return this.type(p);
+      case "browser_fill_form": return this.fillForm(p);
+      case "browser_screenshot": return this.screenshot(p);
+      case "browser_wait": return this.wait(p);
+      case "browser_scroll": return this.scroll(p);
+      case "browser_select": return this.select(p);
+      default: throw new Error(`Unsupported tool in autonomous plan: ${tool}`);
+    }
+  }
+
+  async scrapeContent({ sessionId }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const buffer = await session.page.screenshot({ fullPage: true });
+    const vision = await opencvService.processScreenshot(buffer);
+    
+    // Extract text from the main cropped area
+    const ocrResult = await aiService.extractTextFromImage(vision.croppedBuffer);
+
+    const prompt = `Convert this extracted text into a structured JSON model based on the visible content.
+    
+    TEXT:
+    ${ocrResult.text}
+    
+    Respond in JSON only.`;
+
+    const structuredData = await aiDecisionService._prompt(prompt);
+    return JSON.parse(structuredData.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim());
+  }
+
+  async exportPdf({ sessionId, path: pdfPath }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    
+    const resolvedPath = pdfPath 
+      ? path.resolve(pdfPath) 
+      : path.join(config.mcpDataDir, `export_${Date.now()}.pdf`);
+    
+    await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
+    await session.page.pdf({ path: resolvedPath, format: "A4", printBackground: true });
+    svcLog.info(`PDF exported to ${resolvedPath}`);
+    return { status: "success", path: resolvedPath };
+  }
+
+
+  async captureRelevantFormScreenshot(session, pageInfo) {
+    const fields = (pageInfo.elements || [])
+      .filter((el) => ["input", "select", "textarea", "button"].includes(el.tag))
+      .filter((el) => el.box && el.box.width > 0 && el.box.height > 0);
+
+    if (fields.length === 0) {
+      return session.page.screenshot({ fullPage: false });
+    }
+
+    const viewport = session.page.viewportSize() || config.defaultViewport;
+    const minX = Math.max(0, Math.min(...fields.map((el) => el.box.x)) - 80);
+    const minY = Math.max(0, Math.min(...fields.map((el) => el.box.y)) - 100);
+    const maxX = Math.min(viewport.width, Math.max(...fields.map((el) => el.box.x + el.box.width)) + 80);
+    const maxY = Math.min(viewport.height, Math.max(...fields.map((el) => el.box.y + el.box.height)) + 140);
+    const clip = {
+      x: Math.round(minX),
+      y: Math.round(minY),
+      width: Math.max(200, Math.round(maxX - minX)),
+      height: Math.max(160, Math.round(maxY - minY))
+    };
+
+    try {
+      const buffer = await session.page.screenshot({ fullPage: false, clip });
+      // Further refine with OpenCV
+      const { croppedBuffer } = await opencvService.processScreenshot(buffer);
+      return croppedBuffer;
+    } catch {
+      const buffer = await session.page.screenshot({ fullPage: false });
+      const { croppedBuffer } = await opencvService.processScreenshot(buffer);
+      return croppedBuffer;
+    }
+  }
+
+  async mapFieldWithFreeAiPipeline(session, pageInfo, key, sharedAiState) {
+    const elements = pageInfo.elements || [];
+    const logs = [];
+    const domMatch = aiService.smartMatch(key, elements, { method: "DOM" });
+    logs.push(...domMatch.logs);
+
+    if (domMatch.confidence >= config.aiDomConfidenceThreshold) {
+      return { ...domMatch, logs };
+    }
+
+    if (!sharedAiState.screenshotBuffer) {
+      sharedAiState.screenshotBuffer = await this.captureRelevantFormScreenshot(session, pageInfo);
+      logs.push("Screenshot: captured cropped form region");
+    }
+
+    const cacheKey = pageInfo.url || session.page.url();
+
+    if (!sharedAiState.ocrResult) {
+      try {
+        sharedAiState.ocrResult = await aiService.extractTextFromImage(sharedAiState.screenshotBuffer, { cacheKey });
+        logs.push(...(sharedAiState.ocrResult.logs || []));
+      } catch (error) {
+        sharedAiState.ocrResult = { text: "", logs: [`OCR: failed: ${error.message}`] };
+        logs.push(...sharedAiState.ocrResult.logs);
+      }
+    } else {
+      logs.push("OCR: reused page result");
+    }
+
+    const ocrText = sharedAiState.ocrResult?.text || "";
+    const ocrMatch = await aiService.decideBestFieldMatch({ intent: key, elements, url: pageInfo.url }, ocrText, null);
+    logs.push(...ocrMatch.logs.filter((line) => !logs.includes(line)));
+    if (ocrMatch.methodUsed === "OCR" && ocrMatch.confidence >= config.aiOcrConfidenceThreshold) {
+      return { ...ocrMatch, logs };
+    }
+
+    if (!sharedAiState.visionResult) {
+      try {
+        sharedAiState.visionResult = await aiService.analyzeScreenshot(sharedAiState.screenshotBuffer, { cacheKey });
+        logs.push(...(sharedAiState.visionResult.logs || []));
+      } catch (error) {
+        sharedAiState.visionResult = { analysis: "", logs: [`VISION: failed: ${error.message}`] };
+        logs.push(...sharedAiState.visionResult.logs);
+      }
+    } else {
+      logs.push("VISION: reused page result");
+    }
+
+    const finalMatch = await aiService.decideBestFieldMatch(
+      { intent: key, elements, url: pageInfo.url },
+      ocrText,
+      sharedAiState.visionResult
+    );
+    logs.push(...finalMatch.logs.filter((line) => !logs.includes(line)));
+    return { ...finalMatch, logs };
   }
 
   async fillForm({ sessionId, fields, turbo = null }) {
@@ -1821,31 +2100,33 @@ class BrowserService {
     try {
       // 1. Analyze page to get structured field intelligence
       const pageInfo = await this.analyzePageState(session);
-      const availableFields = pageInfo.elements;
+      const fieldsCacheKey = aiService.cacheKey("fields", pageInfo.url || session.page.url());
+      const cachedFields = aiService.getCached(fieldsCacheKey);
+      if (cachedFields) logs.push(`[CACHE] detected fields reused for ${pageInfo.url}`);
+      const availableFields = cachedFields || pageInfo.elements;
+      if (!cachedFields) aiService.setCached(fieldsCacheKey, availableFields);
+      pageInfo.elements = availableFields;
 
       // 2. Map user data to fields
       const mapping = [];
       const fieldEntries = Object.entries(fields);
+      const sharedAiState = {};
 
       for (const [key, value] of fieldEntries) {
-        const normalizedKey = key.toLowerCase().replace(/[:*]/g, '').trim();
-        
-        let field = availableFields.find(f => {
-          const l = (f.label || "").toLowerCase();
-          const p = (f.placeholder || "").toLowerCase();
-          const n = (f.name || "").toLowerCase();
-          return l === normalizedKey || p === normalizedKey || n === normalizedKey || f.id === key;
-        });
+        const match = await this.mapFieldWithFreeAiPipeline(session, pageInfo, key, sharedAiState);
+        logs.push(`[MATCH] ${key}: ${match.methodUsed} confidence=${match.confidence} selector=${match.selectedElement || "none"}`);
+        for (const line of match.logs || []) logs.push(`  ${line}`);
 
-        if (!field) {
-          // Fuzzy match
-          field = availableFields.find(f => {
-            const l = (f.label || "").toLowerCase();
-            return l.includes(normalizedKey) || normalizedKey.includes(l);
-          });
-        }
-
-        if (field) {
+        if (match.selectedElement) {
+          const field = {
+            ...(match.element || {}),
+            selector: match.selectedElement,
+            label: match.element?.label || match.element?.placeholder || match.element?.name || key,
+            aiMatch: {
+              methodUsed: match.methodUsed,
+              confidence: match.confidence
+            }
+          };
           mapping.push({ field, value, originalKey: key });
         } else {
           // Re-analysis fallback: try to resolve selector directly as a last resort
@@ -1885,7 +2166,13 @@ class BrowserService {
           }
 
           if (verified) {
-            filledFields.push({ field: fieldName, selector: field.selector, attempt: result.attempt });
+            filledFields.push({
+              field: fieldName,
+              selector: field.selector,
+              attempt: result.attempt,
+              methodUsed: field.aiMatch?.methodUsed || "DOM",
+              confidence: field.aiMatch?.confidence ?? 1
+            });
             logs.push(`[SUCCESS] "${fieldName}" filled and verified.`);
           } else {
             failedFields.push({ field: fieldName, selector: field.selector, error: result.error });
@@ -1960,6 +2247,7 @@ class BrowserService {
   }
   
   async _intelligentFillField(session, fieldInfo, value, isTurbo) {
+    const fieldName = fieldInfo.label || fieldInfo.name || fieldInfo.placeholder || fieldInfo.selector || "field";
     let locator = session.page.locator(fieldInfo.selector).first();
 
     // Wait for element visibility
@@ -2110,6 +2398,10 @@ class BrowserService {
     if (!session) throw new Error("Session not found");
 
     const buffer = await session.page.screenshot({ fullPage });
+
+    // MANDATORY OPENCV PIPELINE
+    const vision = await opencvService.processScreenshot(buffer);
+    const finalBuffer = vision.croppedBuffer;
     let absolutePath = "";
 
     if (saveLocal) {
@@ -2118,7 +2410,7 @@ class BrowserService {
       const rawName = fileName || `screenshot-${Date.now()}.png`;
       const safeName = rawName.replace(/[^\w.\-() ]/g, "_");
       absolutePath = path.resolve(root, safeName);
-      await fs.writeFile(absolutePath, buffer);
+      await fs.writeFile(absolutePath, finalBuffer);
     }
 
     let analysis = "";
@@ -2135,7 +2427,12 @@ class BrowserService {
       sessionId: session.id,
       url: session.page.url(),
       path: absolutePath,
-      imageBase64: shouldEmbed ? buffer.toString("base64") : null,
+      imageBase64: shouldEmbed ? finalBuffer.toString("base64") : null,
+      vision: {
+        mainArea: vision.mainArea,
+        regionCount: vision.regions.length,
+        debugPath: vision.debugPath
+      },
       analysis,
       timestamp: new Date().toISOString()
     };

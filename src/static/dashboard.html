@@ -3,89 +3,197 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Universal AI Browser Server | Dashboard</title>
+  <title>Autonomous AI Browser Platform</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #05070a;
+      --panel-bg: rgba(13, 17, 23, 0.7);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      --accent-primary: #818cf8;
+      --accent-secondary: #2dd4bf;
+      --font-main: 'Outfit', sans-serif;
+    }
+
+    body {
+      background: radial-gradient(circle at top right, #111827, #05070a);
+      font-family: var(--font-main);
+    }
+
+    .glass-card {
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: 24px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+
+    .tool-tab {
+      padding: 10px 20px;
+      cursor: pointer;
+      border-radius: 12px;
+      transition: all 0.3s;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .tool-tab.active {
+      background: var(--accent-gradient);
+      color: white;
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+    }
+
+    .tool-grid-hidden { display: none; }
+    
+    .setup-box {
+      background: rgba(0,0,0,0.3);
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      padding: 24px;
+      text-align: left;
+      position: relative;
+    }
+
+    .badge {
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+    }
+    .badge-autonomous { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+    .badge-core { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-scraping { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+    .badge-design { background: rgba(244, 63, 94, 0.2); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.3); }
+
+    .glow-button {
+      position: relative;
+      overflow: hidden;
+    }
+    .glow-button::after {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+      transform: scale(0);
+      transition: transform 0.6s;
+    }
+    .glow-button:hover::after {
+      transform: scale(1);
+    }
+  </style>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1 class="hero-title">Universal AI Browser Server</h1>
-      <p class="hero-subtitle">Premium browser automation for any AI agent. Connected via MCP & REST API.</p>
+      <div style="display: flex; align-items: center; justify-content: center; gap: 15px; margin-bottom: 10px;">
+        <div class="status-dot dot-online" style="width: 12px; height: 12px;"></div>
+        <h1 class="hero-title" style="margin-bottom: 0;">Autonomous Agent Platform</h1>
+      </div>
+      <p class="hero-subtitle">High-performance browser automation & intelligent design extraction.</p>
     </header>
 
     <div class="status-grid">
-      <div class="status-card">
+      <div class="status-card glass-card">
         <div class="status-header">
-          <span class="status-label">Server Status</span>
-          <span class="dot-online status-dot"></span>
+          <span class="status-label">Engine Status</span>
+          <span class="badge badge-autonomous">Ready</span>
         </div>
-        <div class="status-value">Online</div>
-        <p class="muted" id="server-uptime">Running on port 1000</p>
+        <div class="status-value">Active</div>
+        <p class="muted">Connected via Port 1000</p>
       </div>
-      <div class="status-card">
+      <div class="status-card glass-card">
         <div class="status-header">
           <span class="status-label">Active Sessions</span>
-          <span id="sessions-count-dot" class="dot-online status-dot"></span>
+          <span id="sessions-count" class="status-value" style="font-size: 2rem;">0</span>
         </div>
-        <div class="status-value" id="sessions-count">0</div>
-        <p class="muted">Browser instances currently open</p>
-        <p class="muted" style="font-size: 0.75rem; color: #fbbf24; margin-top: 4px;">Tip: 0 sessions? You might be running 2 server instances. Connect IDE via SSE (http://localhost:1000/mcp/sse) to share sessions.</p>
+        <div class="status-value" id="sessions-status" style="font-size: 1rem; color: var(--text-secondary);">Idle</div>
+        <p class="muted">Parallel workers: 2-10</p>
       </div>
-      <div class="status-card">
+      <div class="status-card glass-card">
         <div class="status-header">
-          <span class="status-label">Vision AI</span>
-          <span id="vision-dot" class="dot-online status-dot"></span>
+          <span class="status-label">Vision Intelligence</span>
+          <span class="badge badge-design">Gemini 2.0</span>
         </div>
-        <div class="status-value" id="vision-status">Enabled</div>
-        <p class="muted" id="vision-info">Powered by Gemini Flash</p>
+        <div class="status-value" id="vision-status">Online</div>
+        <p class="muted">Layout & OCR processing active</p>
       </div>
     </div>
 
-    <h2 class="section-title">Tools Explorer</h2>
+    <div style="margin-bottom: 40px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;">
+      <div class="tool-tab active" onclick="filterTools('autonomous')">Autonomous</div>
+      <div class="tool-tab" onclick="filterTools('core')">Core Interaction</div>
+      <div class="tool-tab" onclick="filterTools('scraping')">Data & Scraping</div>
+      <div class="tool-tab" onclick="filterTools('design')">Design & Code</div>
+      <div class="tool-tab" onclick="filterTools('all')">All Tools</div>
+    </div>
+
     <div id="tools-container" class="tools-grid">
-      <!-- Tools will be injected here -->
-      <div class="tool-card">
-        <p style="text-align: center; color: var(--text-secondary);">Loading tools...</p>
-      </div>
+      <!-- Tools injected here -->
     </div>
 
-    <h2 class="section-title">Live Agent Activity</h2>
-    <div id="live-feed" class="live-feed">
-      <div class="feed-line">
-        <span class="timestamp">[System]</span>
-        <span class="event-type">INFO</span>
-        Listening for agent activities via SSE...
+    <div class="grid-2" style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 30px; margin-top: 60px;">
+      <div>
+        <h2 class="section-title">Execution Timeline</h2>
+        <div id="live-feed" class="live-feed glass-card" style="height: 400px; background: rgba(0,0,0,0.5);">
+          <div class="feed-line">
+            <span class="timestamp">[System]</span>
+            <span class="event-type">BOOT</span>
+            Autonomous engine initialized...
+          </div>
+        </div>
       </div>
-    </div>
-
-    <div style="margin-top: 60px; text-align: center;">
-      <h2 class="section-title" style="justify-content: center;">Agent Setup</h2>
-      <p class="muted" style="margin-bottom: 20px;">Use the prompt below to connect ANY external AI to this server.</p>
-      <button class="btn btn-primary" style="margin: 0 auto; padding: 12px 24px;" onclick="copySetupPrompt()">
-        Copy AI Connection Prompt
-      </button>
+      
+      <div>
+        <h2 class="section-title">Agent Connection</h2>
+        <div class="setup-box glass-card">
+          <h3 style="font-size: 1.1rem; margin-bottom: 15px;">Setup Instructions</h3>
+          <p class="muted" style="font-size: 0.9rem; margin-bottom: 20px;">
+            To connect your AI Agent (Cursor, Roo, Windsurf), copy the optimized bootstrap prompt below. 
+            It provides the essential context while keeping the token count low.
+          </p>
+          <div style="background: #000; padding: 15px; border-radius: 12px; margin-bottom: 20px; font-family: monospace; font-size: 0.8rem; color: #818cf8;">
+            POST /api/bridge/call<br>
+            { "tool": "browser_autonomous_goal", ... }
+          </div>
+          <button class="btn btn-primary glow-button" style="width: 100%; justify-content: center; padding: 14px;" onclick="copySetupPrompt()">
+            Copy Bootstrap Prompt
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 
   <!-- Modal -->
   <div id="modal-overlay" class="overlay">
-    <div class="modal">
+    <div class="modal glass-card">
       <span class="close-modal" onclick="closeModal()">&times;</span>
       <h3 id="modal-title" style="margin-bottom: 10px;">Tool Definition</h3>
-      <p id="modal-subtitle" class="muted" style="margin-bottom: 20px;">Copy this into your AI's tool/function list.</p>
-      <pre id="modal-code"></pre>
+      <pre id="modal-code" style="font-size: 0.8rem;"></pre>
       <div style="margin-top: 20px; display: flex; gap: 10px;">
-        <button class="btn btn-primary" onclick="copyModalCode()">Copy Strategy</button>
+        <button class="btn btn-primary" onclick="copyModalCode()">Copy Definition</button>
       </div>
     </div>
   </div>
 
   <script>
     let tools = [];
-    
+    let currentFilter = 'autonomous';
+
+    const CATEGORIES = {
+      autonomous: ['browser_autonomous_goal', 'browser_explore_site', 'browser_crawl', 'browser_schedule_task'],
+      core: ['browser_open', 'browser_click', 'browser_type', 'browser_fill_form', 'browser_press_key', 'browser_wait'],
+      scraping: ['browser_scrape_content', 'browser_analyze', 'browser_sessions'],
+      design: ['browser_extract_ui_schema', 'browser_generate_code', 'browser_export_pdf']
+    };
+
     async function init() {
       await fetchStatus();
       await fetchTools();
@@ -95,59 +203,75 @@
 
     async function fetchStatus() {
       try {
-        const res = await fetch('/api/tools/sessions');
+        const res = await fetch('/api/system/status');
         const json = await res.json();
-        const count = json.data?.sessions?.length || 0;
+        const count = json.data?.sessions || 0;
         document.getElementById('sessions-count').textContent = count;
-        document.getElementById('sessions-count-dot').className = count > 0 ? 'dot-online status-dot' : 'dot-offline status-dot';
-        
-        // Check root for Vision status
-        const rootRes = await fetch('/');
-        const rootJson = await rootRes.json();
-        const visionEnabled = rootJson.data.features.visionAI.includes('configured ✓');
-        document.getElementById('vision-status').textContent = visionEnabled ? 'Enabled' : 'Disabled';
-        document.getElementById('vision-dot').className = visionEnabled ? 'dot-online status-dot' : 'dot-offline status-dot';
+        document.getElementById('sessions-status').textContent = count > 0 ? 'Executing Tasks' : 'Idle';
+        document.getElementById('vision-status').textContent = json.data?.aiDecision ? 'Online' : 'Offline';
       } catch (e) {}
     }
 
     async function fetchTools() {
       try {
-        const res = await fetch('/api/tools/definitions/openai');
-        tools = await res.json();
+        const res = await fetch('/api/tools/definitions/mcp');
+        const json = await res.json();
+        tools = json.data;
         renderTools();
       } catch (e) {
-        document.getElementById('tools-container').innerHTML = '<p class="error">Failed to load tools definitions.</p>';
+        document.getElementById('tools-container').innerHTML = '<p class="error">Failed to load tools.</p>';
       }
+    }
+
+    function filterTools(cat) {
+      currentFilter = cat;
+      document.querySelectorAll('.tool-tab').forEach(t => {
+        t.classList.toggle('active', t.textContent.toLowerCase().includes(cat));
+      });
+      renderTools();
+    }
+
+    function getBadge(toolName) {
+      if (CATEGORIES.autonomous.includes(toolName)) return 'badge-autonomous';
+      if (CATEGORIES.core.includes(toolName)) return 'badge-core';
+      if (CATEGORIES.scraping.includes(toolName)) return 'badge-scraping';
+      if (CATEGORIES.design.includes(toolName)) return 'badge-design';
+      return 'badge-core';
     }
 
     function renderTools() {
       const container = document.getElementById('tools-container');
-      container.innerHTML = tools.map((t, i) => `
-        <div class="tool-card">
-          <div class="tool-name">${t.function.name}</div>
-          <div class="tool-desc">${t.function.description}</div>
-          <div class="tool-actions">
-            <button class="btn btn-secondary" onclick="viewDefinition(${i})">AI Schema</button>
-            <button class="btn btn-primary" onclick="copyForAI(${i})">Copy for Agent</button>
+      const filtered = currentFilter === 'all' 
+        ? tools 
+        : tools.filter(t => CATEGORIES[currentFilter]?.includes(t.name));
+
+      container.innerHTML = filtered.map((t, i) => `
+        <div class="tool-card glass-card">
+          <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;">
+            <div class="tool-name" style="color: var(--accent-primary); font-weight: 800;">${t.name}</div>
+            <span class="badge ${getBadge(t.name)}">${currentFilter === 'all' ? 'Tool' : currentFilter}</span>
+          </div>
+          <div class="tool-desc" style="font-size: 0.85rem; opacity: 0.8;">${t.description}</div>
+          <div class="tool-actions" style="margin-top: auto; border-top: 1px solid var(--panel-border); padding-top: 15px;">
+            <button class="btn btn-secondary" style="flex: 1; justify-content: center;" onclick="viewDefinition('${t.name}')">Schema</button>
+            <button class="btn btn-primary" style="flex: 1; justify-content: center;" onclick="copyForAI('${t.name}')">Copy</button>
           </div>
         </div>
       `).join('');
     }
 
-    function viewDefinition(index) {
-      const tool = tools[index];
-      document.getElementById('modal-title').textContent = tool.function.name;
+    function viewDefinition(name) {
+      const tool = tools.find(t => t.name === name);
+      document.getElementById('modal-title').textContent = tool.name;
       document.getElementById('modal-code').textContent = JSON.stringify(tool, null, 2);
       document.getElementById('modal-overlay').style.display = 'flex';
     }
 
-    function copyForAI(index) {
-      const tool = tools[index];
+    function copyForAI(name) {
+      const tool = tools.find(t => t.name === name);
       navigator.clipboard.writeText(JSON.stringify(tool));
-      const btn = event.target;
-      const original = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => btn.textContent = original, 2000);
+      event.target.textContent = 'Copied!';
+      setTimeout(() => event.target.textContent = 'Copy', 2000);
     }
 
     function closeModal() {
@@ -155,60 +279,30 @@
     }
 
     function copyModalCode() {
-      const code = document.getElementById('modal-code').textContent;
-      navigator.clipboard.writeText(code);
-      alert('Copied tool definition to clipboard!');
+      navigator.clipboard.writeText(document.getElementById('modal-code').textContent);
+      alert('Definition copied!');
     }
 
-    async function copySetupPrompt() {
-      const prompt = `I have a local Browser Automation Server at http://localhost:1000.
-It supports standard REST tools. Below is a 1-page summary of available tools.
-If you need a specific tool's full JSON schema, fetch it from http://localhost:1000/api/tools/{tool_name}/schema
+    function copySetupPrompt() {
+      const prompt = `I have a local Autonomous AI Browser Platform at http://localhost:1000.
+Connect using this bootstrap context:
+- Base URL: http://localhost:1000
+- REST Bridge: POST /api/bridge/call { "tool": "tool_name", "arguments": { ... } }
+- MCP SSE: http://localhost:1000/mcp/sse
 
-SUMMARY (llms.txt):
-I am a browser automation server. You can control a Chrome browser through me.
-Main Endpoints:
-- http://localhost:1000/api/tools/browser_open (url, sessionId?)
-- http://localhost:1000/api/tools/browser_click (selector, query, sessionId)
-- http://localhost:1000/api/tools/browser_type (selector, query, text, sessionId)
-- http://localhost:1000/api/tools/browser_fill_form (fields: object, sessionId)
-- http://localhost:1000/api/tools/browser_screenshot (sessionId, fullPage?)
+PREFERRED TOOLS:
+1. browser_autonomous_goal: Use for any complex goal. It plans and executes automatically.
+2. browser_scrape_content: Use for visual-first data extraction.
+3. browser_extract_ui_schema: Use to analyze layout for design/code tasks.
 
-CRITICAL RULES:
-1. To start, call browser_sessions then browser_open. Use the returned sessionId everywhere.
-2. Form Filling: NEVER use browser_type repeatedly for multiple fields. ALWAYS use browser_fill_form to pass an object with all fields at once for 5x faster execution.`;
+CRITICAL: Use "browser_sessions" to check for existing sessions before starting.`;
       
       navigator.clipboard.writeText(prompt);
-      alert('Bootstrap prompt copied! This is a much smaller prompt that tells the AI exactly how to fetch the rest of the tools.');
+      alert('Bootstrap prompt copied!');
     }
 
     function setupSSE() {
-      const feed = document.getElementById('live-feed');
-      const source = new EventSource('/agent/events');
-      
-      source.addEventListener('agent.activity', (event) => {
-        const data = JSON.parse(event.data);
-        if (data.isAgentWorking) {
-          addFeedLine('ACTIVITY', data.currentAction, true);
-        }
-      });
-
-      source.addEventListener('agent.alert', (event) => {
-        const data = JSON.parse(event.data);
-        addFeedLine('ALERT', data.message);
-      });
-    }
-
-    function addFeedLine(type, message, isActive = false) {
-      const feed = document.getElementById('live-feed');
-      const time = new Date().toLocaleTimeString();
-      const line = document.createElement('div');
-      line.className = 'feed-line' + (isActive ? ' active' : '');
-      line.innerHTML = `<span class="timestamp">[${time}]</span><span class="event-type">${type}</span> ${message}`;
-      feed.prepend(line);
-      
-      // Keep only top 50
-      while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+      // Mocked for now, but will connect to actual activity feed
     }
 
     init();

@@ -342,6 +342,28 @@ router.post("/fill_form", async (req, res) => {
   }
 });
 
+router.post("/goal", async (req, res) => {
+  try {
+    const { sessionId, goal } = req.body || {};
+    if (!goal) return res.status(400).json(failure("goal", "Missing required field: goal"));
+    const data = await runAgentAction("goal", () => browserService.executeAutonomousGoal({ sessionId, goal }));
+    return res.json(success("goal", data));
+  } catch (error) {
+    return res.status(500).json(failure("goal", error));
+  }
+});
+
+router.post("/scrape", async (req, res) => {
+  try {
+    const { sessionId } = req.body || {};
+    if (!sessionId) return res.status(400).json(failure("scrape", "Missing required field: sessionId"));
+    const data = await runAgentAction("scrape", () => browserService.scrapeContent({ sessionId }));
+    return res.json(success("scrape", data));
+  } catch (error) {
+    return res.status(500).json(failure("scrape", error));
+  }
+});
+
 router.post("/plan", async (req, res) => {
   try {
     const { sessionId, goal, payload } = req.body || {};

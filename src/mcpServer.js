@@ -23,14 +23,20 @@ import { figmaGeneratorService } from "./services/figmaGeneratorService.js";
 import { webSearchService } from "./services/webSearchService.js";
 import { projectSyncService } from "./services/projectSyncService.js";
 import { aiDecisionService } from "./services/aiDecisionService.js";
-import { queueService } from "./services/queueService.js";
-import { workerService } from "./services/workerService.js";
 import { selfHealingSelector } from "./services/selfHealingSelector.js";
 import { sessionStore } from "./services/sessionStore.js";
 import { wsService } from "./services/wsService.js";
 import { createServiceLogger } from "./services/loggerService.js";
 import { createApp } from "./app.js";
 import { config } from "./config.js";
+import { workerService } from "./services/workerService.js";
+import { queueService } from "./services/queueService.js";
+import { crawlerService } from "./services/crawlerService.js";
+import { uiSchemaService } from "./services/uiSchemaService.js";
+import { codeGeneratorService } from "./services/codeGeneratorService.js";
+import { replayService } from "./services/replayService.js";
+import { schedulerService } from "./services/schedulerService.js";
+import { instructionMemoryService } from "./services/instructionMemoryService.js";
 
 const bootLog = createServiceLogger("boot");
 
@@ -478,6 +484,108 @@ This tool does the work of exploring the entire site in one call.`,
     },
     ({ sessionId, template, payload }) =>
       browserService.executeFlowTemplate({ sessionId, template, payload: payload || {} })
+  );
+
+  tool(
+    "browser_crawl",
+    "DEEP CRAWL: Automatically discover and visit all internal links on a website up to a certain depth. Returns a list of visited URLs.",
+    {
+      sessionId: z.string(),
+      startUrl: z.string(),
+      maxDepth: z.number().optional().default(2),
+      maxPages: z.number().optional().default(50)
+    },
+    (args) => crawlerService.startCrawl(args)
+  );
+
+  tool(
+    "browser_extract_ui_schema",
+    "UI ANALYZER: Extract a structured high-level schema of the current page layout and components (Hero, Navbar, Grid, etc.). Essential for design-to-code workflows.",
+    {
+      sessionId: z.string()
+    },
+    async ({ sessionId }) => {
+      const session = browserService.getSession(sessionId);
+      if (!session) throw new Error("Session not found");
+      const pageInfo = await browserService.analyzePageState(session);
+      return uiSchemaService.extractSchema(pageInfo);
+    }
+  );
+
+  tool(
+    "browser_generate_code",
+    "CODE GEN: Convert a UI schema into production-ready React components using Tailwind CSS. Returns a set of files ready to be saved.",
+    {
+      sessionId: z.string().optional(),
+      schema: z.record(z.any()).describe("UI Schema from browser_extract_ui_schema")
+    },
+    (args) => codeGeneratorService.generateReactCode(args.schema)
+  );
+  
+  tool(
+    "browser_export_pdf",
+    "DESIGN: Export the current page as a high-quality PDF. Useful for saving invoices, reports, or visual records.",
+    {
+      sessionId: z.string(),
+      path: z.string().optional().describe("Absolute path to save the PDF. Defaults to .mcp_data directory.")
+    },
+    (args) => browserService.exportPdf(args)
+  );
+
+  tool(
+    "browser_schedule_task",
+    "SCHEDULE: Run a browser automation goal periodically. Useful for price monitoring or automated reports.",
+    {
+      id: z.string().describe("Unique job ID"),
+      goal: z.string(),
+      intervalMs: z.number().describe("Interval in milliseconds (e.g. 3600000 for hourly)"),
+      sessionId: z.string().optional().default("auto")
+    },
+    (args) => schedulerService.scheduleTask(args.id, args)
+  );
+
+  tool(
+    "browser_set_preference",
+    "MEMORIZE: Store a user preference or instruction for future use (e.g. 'always use test@example.com for email').",
+    {
+      key: z.string(),
+      value: z.string()
+    },
+    (args) => instructionMemoryService.setPreference(args.key, args.value)
+  );
+
+  tool(
+    "browser_autonomous_goal",
+    "AUTOPILOT: High-level autonomous goal solver. Generates a multi-step plan, executes it with self-healing, and handles recovery automatically. No session required (will create one).",
+    {
+      sessionId: z.string().optional(),
+      goal: z.string().describe("High-level goal (e.g. 'search for flights to NYC and find the cheapest one')")
+    },
+    (args) => browserService.executeAutonomousGoal(args)
+  );
+
+  tool(
+    "browser_scrape_content",
+    "VISION SCRAPING: Uses OpenCV block detection + OCR + AI to extract structured data from the current page visually. Best for complex layouts where DOM scraping fails.",
+    {
+      sessionId: z.string()
+    },
+    (args) => browserService.scrapeContent(args)
+  );
+
+  tool(
+    "browser_form_plan",
+    "AI PLANNER: Generate a structured JSON plan for filling a complex form based on a goal. Does not execute, only plans.",
+    {
+      sessionId: z.string(),
+      goal: z.string().describe("Goal for form filling (e.g. 'fill as a person named John Doe')")
+    },
+    async ({ sessionId, goal }) => {
+      const session = browserService.getSession(sessionId);
+      if (!session) throw new Error("Session not found");
+      const pageInfo = await browserService.analyzePageState(session);
+      return aiDecisionService.generateFormPlan(goal, pageInfo.elements);
+    }
   );
 
   tool(

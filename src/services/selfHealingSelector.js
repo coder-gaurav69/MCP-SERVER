@@ -49,6 +49,7 @@ class SelfHealingSelector {
     // Strategy 1: DOM-based heuristic alternatives
     const domResult = await this._tryDomAlternatives(page, originalSelector, query, action);
     if (domResult.healed) {
+      domResult.confidence = (domResult.score || 50) / 100;
       this._recordHealing(originalSelector, domResult.selector, "dom-heuristic", Date.now() - startTime);
       this._healingCache.set(cacheKey, domResult);
       return domResult;
@@ -58,6 +59,7 @@ class SelfHealingSelector {
     if (aiDecisionService.isAvailable() && query) {
       const aiResult = await this._tryAiSuggestion(page, query, action);
       if (aiResult.healed) {
+        aiResult.confidence = aiResult.confidence || 0.8;
         this._recordHealing(originalSelector, aiResult.selector, "ai-suggestion", Date.now() - startTime);
         this._healingCache.set(cacheKey, aiResult);
         return aiResult;
@@ -66,7 +68,7 @@ class SelfHealingSelector {
 
     log.warn("Self-healing failed — no alternative found", { originalSelector, query });
     this._recordHealing(originalSelector, null, "failed", Date.now() - startTime);
-    return { healed: false, selector: originalSelector, strategy: "none" };
+    return { healed: false, selector: originalSelector, strategy: "none", confidence: 0 };
   }
 
   /** Strategy 1: Try DOM-based alternative selectors. */

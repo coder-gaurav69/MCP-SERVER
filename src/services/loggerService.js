@@ -8,7 +8,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { config } from "../config.js";
 
-const LOG_DIR = path.resolve(config.logsDir || "src/.ai_outputs/logs");
+const LOG_DIR = config.logsDir;
 
 // Ensure log directory exists synchronously at import time
 try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch { /* ignore */ }
