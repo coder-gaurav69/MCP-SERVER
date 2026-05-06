@@ -468,6 +468,46 @@ This tool does the work of exploring the entire site in one call.`,
     ({ sessionId, goal }) => browserService.autofill({ sessionId, goal })
   );
 
+  // ── Autonomous Goal (ALL-IN-ONE) ────────────────────────────
+
+  tool(
+    "browser_autonomous_goal",
+    `⭐ PRIMARY TOOL — Use this for ANY multi-step browser task. 
+Combines open + analyze + fill form + screenshot in ONE call.
+Pass 'url' to open a page first, 'goal' to describe what to do (e.g. 'fill the invoice form'), 
+and optionally 'fields' as key-value pairs for explicit field values.
+Set 'submit=true' to automatically click the submit button after filling.
+This is the fastest way to automate any browser workflow.`,
+    {
+      sessionId: z.string().optional().describe("Existing session ID. Omit to auto-create."),
+      url: z.string().optional().describe("URL to open before executing the goal"),
+      goal: z.string().optional().describe("Natural language description of the goal (e.g. 'fill the invoice form with patient John Doe')"),
+      fields: z.record(z.string()).optional().describe("Explicit field values: { 'Field Label': 'value', ... }. Takes priority over AI-generated data."),
+      turbo: z.boolean().optional().describe("Enable turbo mode for faster form filling (skips animations)"),
+      submit: z.boolean().optional().describe("Automatically click the submit button after filling the form")
+    },
+    (params) => browserService.autonomousGoal(params)
+  );
+
+  tool(
+    "browser_scrape_content",
+    "Extract structured content from the current page: headings, paragraphs, links, tables, lists, and form fields. Use this for data extraction tasks.",
+    {
+      sessionId: z.string(),
+      query: z.string().optional().describe("Optional hint for what to focus on (e.g. 'product list', 'pricing table')")
+    },
+    ({ sessionId, query }) => browserService.scrapeContent({ sessionId, query })
+  );
+
+  tool(
+    "browser_extract_ui_schema",
+    "Extract the visual UI schema of the current page: colors, fonts, layout, buttons, and input fields. Use this for design analysis, cloning, or code generation tasks.",
+    {
+      sessionId: z.string()
+    },
+    ({ sessionId }) => browserService.extractUiSchema({ sessionId })
+  );
+
   tool(
     "browser_flow",
     "Execute a built-in flow template (login/signup/formSubmission) with all fields at once.",

@@ -112,10 +112,25 @@ export function createApp() {
 
     try {
       const result = await tool.handler(args);
+
+      // Strip large imageBase64 blobs from REST responses to keep payloads lean.
+      // Callers should use /screenshot/image?sessionId=... to fetch the actual image.
+      let safeResult = result;
+      if (result && typeof result === "object" && "imageBase64" in result) {
+        const port = config.port || 1000;
+        const sid = result.sessionId || (rawArgs && rawArgs.sessionId) || "";
+        const { imageBase64: _stripped, ...rest } = result;
+        safeResult = {
+          ...rest,
+          imageBase64: null,
+          screenshotUrl: sid ? `http://127.0.0.1:${port}/screenshot/image?sessionId=${sid}` : undefined
+        };
+      }
+
       return {
         ok: true,
         statusCode: 200,
-        payload: success(toolName, result)
+        payload: success(toolName, safeResult)
       };
     } catch (error) {
       return {
@@ -393,26 +408,32 @@ export function createApp() {
     registerAllTools();
     let output = "# Browser Automation Universal Server\n\n";
     output += "⚠️ VERY IMPORTANT INSTRUCTIONS FOR AI AGENTS ⚠️\n";
-    output += "1. **NO CURL**: Use your native MCP Tool Call functions. DO NOT use `curl` or PowerShell terminal commands.\n";
-    output += "2. **SMART FORM FILLING**: To fill a form, follow this blueprint:\n";
-    output += "   a. Call `browser_analyze` first.\n";
-    output += "   b. Look for the `forms` object in the response.\n";
-    output += "   c. COPY the keys from `suggestedPayload` exactly as they appear.\n";
-    output += "   d. Use `browser_fill_form` with `turbo: true` and those exact keys.\n";
-    output += "3. **LEAN DATA**: Use `browser_screenshot` with `embedImage: false` + `analyze: true` for AI visual descriptions.\n\n";
-    
-    output += "This server provides a REST API as a fallback: http://localhost:1000/api/tools/{tool_name}\n\n";
+    output += "1. **USE browser_autonomous_goal FIRST**: For any task involving opening a URL, filling forms, or taking screenshots, use `browser_autonomous_goal` in ONE call instead of multiple tool calls.\n";
+    output += "2. **NO CURL**: Use your native MCP Tool Call functions. DO NOT use `curl` or PowerShell terminal commands.\n";
+    output += "3. **SMART FORM FILLING**: Use `browser_autonomous_goal` with 'fields' key-value pairs. For unknown fields, use `browser_analyze` first to discover `suggestedPayload` keys.\n";
+    output += "4. **LEAN DATA**: Use `browser_screenshot` with `embedImage: false` for REST clients. Full images are at `/screenshot/image?sessionId=...`\n\n";
+
+    output += "## ⭐ PRIMARY WORKFLOW (use this for most tasks)\n\n";
+    output += "```\n";
+    output += "browser_autonomous_goal({ url: 'https://...', goal: 'fill the form', fields: { 'Name': 'John Doe', 'Email': 'john@example.com' }, submit: true })\n";
+    output += "```\n\n";
+    output += "This single call: opens URL → analyzes page → fills form → takes screenshot → returns everything.\n\n";
+
+    output += "## REST Bridge (PowerShell / curl)\n\n";
+    output += "```\nPOST http://localhost:1000/api/bridge/call\nContent-Type: application/json\n{ \"tool\": \"browser_autonomous_goal\", \"arguments\": { \"url\": \"https://...\", \"goal\": \"fill the form\" } }\n```\n\n";
+    output += "Or use the direct REST endpoint: POST http://localhost:1000/api/browser/autonomous_goal\n\n";
+
     output += "## Most Used Tools (Bootstrap)\n\n";
-    
-    const bootstrap = ['browser_open', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_analyze', 'browser_sessions'];
+
+    const bootstrap = ['browser_autonomous_goal', 'browser_open', 'browser_analyze', 'browser_fill_form', 'browser_screenshot', 'browser_scrape_content', 'browser_extract_ui_schema', 'browser_sessions'];
     for (const name of bootstrap) {
       const tool = toolsRegistry.find(t => t.name === name);
-      if (tool) output += `- **${tool.name}**: ${tool.description}\n`;
+      if (tool) output += `- **${tool.name}**: ${tool.description.split("\n")[0]}\n`;
     }
-    
+
     output += "\n## Full Documentation\nRead the detailed guide: http://localhost:1000/mcp/tool-guide\n";
     output += "Tool definitions: http://localhost:1000/api/tools/definitions/mcp\n";
-    
+
     res.setHeader("Content-Type", "text/plain");
     res.send(output);
   });
@@ -688,6 +709,15 @@ export function createApp() {
     const port = config.port || 1000;
     res.json(success("bridge_prompt", {
       endpoint: `http://127.0.0.1:${port}/api/bridge/call`,
+      preferredTool: "browser_autonomous_goal",
+      quickStartExample: {
+        tool: "browser_autonomous_goal",
+        arguments: {
+          url: "https://example.com",
+          goal: "fill the contact form with test data",
+          submit: false
+        }
+      },
       requestShape: {
         tool: "browser_sessions",
         arguments: {}
@@ -695,7 +725,9 @@ export function createApp() {
       notes: [
         "Use POST with JSON body.",
         "arguments/nativeArgs/args/params are all accepted.",
-        "For WebFetch wrappers, keep format=text|markdown|html only."
+        "Use browser_autonomous_goal for any task that involves opening a URL + filling a form + screenshot.",
+        "Screenshot images are at GET /screenshot/image?sessionId=... (returns raw PNG).",
+        "REST bridge strips imageBase64 from responses — use screenshotUrl field instead."
       ]
     }));
   });

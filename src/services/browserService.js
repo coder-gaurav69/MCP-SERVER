@@ -1869,7 +1869,7 @@ class BrowserService {
         logs.push(`[FILL] Starting "${fieldName}"`);
         
         try {
-          const result = await this._intelligentFillField(session, field, value, isTurbo);
+          const result = await this._intelligentFillField(session, field, value, isTurbo, fieldName);
           
           // VERIFICATION: Read back value to ensure it stuck
           let verified = result.success;
@@ -1878,7 +1878,7 @@ class BrowserService {
               const actualValue = await session.page.locator(field.selector).inputValue();
               if (String(actualValue) !== String(value) && String(value).length > 0) {
                 logs.push(`[WARN] Value mismatch for "${fieldName}". Expected "${value}", got "${actualValue}". Retrying once...`);
-                const retry = await this._intelligentFillField(session, field, value, false);
+                const retry = await this._intelligentFillField(session, field, value, false, fieldName);
                 verified = retry.success;
               }
             } catch { /* Some inputs don't support inputValue() */ }
@@ -1899,7 +1899,12 @@ class BrowserService {
 
       // 4. Final Settle & Screenshot
       await this.waitForSettle(session, isTurbo ? "lazy" : "strict");
-      const screenshotResult = await this.screenshot({ sessionId: session.id, saveLocal: true, fileName: `form-filled-${Date.now()}.png` });
+      let screenshotResult = null;
+      try {
+        screenshotResult = await this.screenshot({ sessionId: session.id, saveLocal: true, embedImage: false, fileName: `form-filled-${Date.now()}.png` });
+      } catch (screenshotErr) {
+        logs.push(`[WARN] Post-fill screenshot failed: ${screenshotErr.message}`);
+      }
 
       const success = failedFields.length === 0;
       const resultReport = {
@@ -1907,7 +1912,7 @@ class BrowserService {
         filledFields,
         failedFields,
         logs,
-        screenshot: screenshotResult.path,
+        screenshot: screenshotResult?.path || null,
         durationMs: Date.now() - startTime
       };
 
@@ -1958,8 +1963,240 @@ class BrowserService {
       turbo: false 
     });
   }
-  
-  async _intelligentFillField(session, fieldInfo, value, isTurbo) {
+
+  /**
+   * Autonomous Goal: Open a URL, analyze the page, fill the form, and take a screenshot — all in one call.
+   * @param {string} sessionId - Optional existing session ID
+   * @param {string} url - URL to open
+   * @param {string} goal - High-level goal / description of what to do
+   * @param {Object} fields - Optional explicit field values to fill (key=label/name, value=string)
+   * @param {boolean} turbo - Whether to use turbo mode for filling
+   * @param {boolean} submit - Whether to click the submit button after filling
+   */
+  async autonomousGoal({ sessionId, url, goal = "", fields = null, turbo = false, submit = false }) {
+    const session = await this.getOrCreateSession(sessionId);
+    const port = config.port || 1000;
+    const steps = [];
+
+    // 1. Open URL if provided
+    if (url) {
+      await this.openUrl({ sessionId: session.id, url });
+      steps.push({ step: "open", url, status: "success" });
+    }
+
+    // 2. Wait for page to settle
+    await this.waitForSettle(session, "strict");
+
+    // 3. Analyze page structure
+    const pageInfo = await this.analyzePageState(session);
+    const title = await session.page.title().catch(() => "");
+    steps.push({ step: "analyze", elementCount: pageInfo.interactiveCount, formCount: pageInfo.forms?.length || 0, status: "success" });
+
+    // 4. Fill form — explicit fields take priority, then AI-generated, then skip
+    let fillResult = null;
+    if (fields && Object.keys(fields).length > 0) {
+      fillResult = await this.fillForm({ sessionId: session.id, fields, turbo });
+      steps.push({ step: "fill_form", mode: "explicit", filledCount: fillResult.filledFields?.length || 0, status: fillResult.success ? "success" : "partial" });
+    } else if (goal && aiDecisionService.isAvailable()) {
+      try {
+        const aiData = await aiDecisionService.generateAutofillData(goal, pageInfo.elements, title);
+        fillResult = await this.fillForm({ sessionId: session.id, fields: aiData.fields, turbo });
+        steps.push({ step: "fill_form", mode: "ai_generated", filledCount: fillResult.filledFields?.length || 0, status: fillResult.success ? "success" : "partial" });
+      } catch (fillErr) {
+        steps.push({ step: "fill_form", mode: "ai_generated", status: "failed", error: fillErr.message });
+      }
+    }
+
+    // 5. Optionally click submit
+    if (submit && fillResult) {
+      try {
+        await this.click({ sessionId: session.id, query: "submit button" });
+        await this.waitForSettle(session, "lazy");
+        steps.push({ step: "submit", status: "success" });
+      } catch (submitErr) {
+        steps.push({ step: "submit", status: "failed", error: submitErr.message });
+      }
+    }
+
+    // 6. Take screenshot (non-fatal)
+    let screenshotUrl = null;
+    let imageBase64 = null;
+    try {
+      const screenshotResult = await this.screenshot({ sessionId: session.id, saveLocal: true, embedImage: true, fileName: `goal-${Date.now()}.png` });
+      screenshotUrl = `http://127.0.0.1:${port}/screenshot/image?sessionId=${session.id}`;
+      imageBase64 = screenshotResult.imageBase64 || null;
+      steps.push({ step: "screenshot", status: "success", screenshotUrl });
+    } catch (ssErr) {
+      steps.push({ step: "screenshot", status: "failed", error: ssErr.message });
+    }
+
+    this.logAction(session, { action: "autonomousGoal", result: "success", metadata: { url, goal, steps: steps.length } });
+
+    return {
+      sessionId: session.id,
+      url: session.page.url(),
+      pageTitle: title,
+      goal,
+      steps,
+      forms: pageInfo.forms || [],
+      fillResult,
+      screenshotUrl,
+      imageBase64
+    };
+  }
+
+  /**
+   * Scrape content from the current page — text, headings, tables, links, lists.
+   * @param {string} sessionId
+   * @param {string} query - Optional hint for what to extract
+   */
+  async scrapeContent({ sessionId, query = "" }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const content = await session.page.evaluate(() => {
+      const getText = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ");
+      const isVisible = (el) => {
+        const s = window.getComputedStyle(el);
+        return s.display !== "none" && s.visibility !== "hidden" && el.offsetWidth > 0;
+      };
+
+      const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+        .filter(isVisible)
+        .map(el => ({ tag: el.tagName.toLowerCase(), text: getText(el) }));
+
+      const paragraphs = Array.from(document.querySelectorAll("p"))
+        .filter(el => isVisible(el) && getText(el).length > 10)
+        .slice(0, 20)
+        .map(el => getText(el));
+
+      const links = Array.from(document.querySelectorAll("a[href]"))
+        .filter(isVisible)
+        .slice(0, 30)
+        .map(el => ({ text: getText(el), href: el.getAttribute("href") }))
+        .filter(l => l.text.length > 0);
+
+      const tables = Array.from(document.querySelectorAll("table"))
+        .filter(isVisible)
+        .slice(0, 5)
+        .map(table => {
+          const headers = Array.from(table.querySelectorAll("th")).map(th => getText(th));
+          const rows = Array.from(table.querySelectorAll("tbody tr")).slice(0, 10).map(row =>
+            Array.from(row.querySelectorAll("td")).map(td => getText(td))
+          );
+          return { headers, rows };
+        });
+
+      const lists = Array.from(document.querySelectorAll("ul, ol"))
+        .filter(isVisible)
+        .slice(0, 5)
+        .map(list => Array.from(list.querySelectorAll("li")).slice(0, 10).map(li => getText(li)));
+
+      const forms = Array.from(document.querySelectorAll("form")).map((form, i) => {
+        const inputs = Array.from(form.querySelectorAll("input, select, textarea"))
+          .filter(el => !["submit", "button", "reset", "hidden"].includes(el.getAttribute("type")))
+          .map(el => ({
+            name: el.getAttribute("name"),
+            type: el.getAttribute("type") || el.tagName.toLowerCase(),
+            placeholder: el.getAttribute("placeholder"),
+            value: el.value || undefined
+          }));
+        return { index: i, inputs };
+      });
+
+      return {
+        title: document.title,
+        url: window.location.href,
+        headings,
+        paragraphs,
+        links,
+        tables,
+        lists,
+        forms,
+        bodyText: (document.body?.innerText || "").slice(0, 3000)
+      };
+    });
+
+    this.logAction(session, { action: "scrapeContent", result: "success", metadata: { url: content.url, query } });
+    return { sessionId: session.id, query, ...content };
+  }
+
+  /**
+   * Extract UI schema — colors, fonts, layout, and component map — from the current page.
+   * @param {string} sessionId
+   */
+  async extractUiSchema({ sessionId }) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const schema = await session.page.evaluate(() => {
+      const getStyle = (el, prop) => window.getComputedStyle(el).getPropertyValue(prop);
+
+      // Collect unique colors
+      const colorSet = new Set();
+      const fontSet = new Set();
+      Array.from(document.querySelectorAll("*")).slice(0, 200).forEach(el => {
+        const color = getStyle(el, "color");
+        const bg = getStyle(el, "background-color");
+        const font = getStyle(el, "font-family");
+        if (color && color !== "rgba(0, 0, 0, 0)") colorSet.add(color);
+        if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") colorSet.add(bg);
+        if (font) fontSet.add(font.split(",")[0].trim().replace(/['"]/g, ""));
+      });
+
+      // Body layout
+      const body = document.body;
+      const bodyStyle = window.getComputedStyle(body);
+
+      // Buttons
+      const buttons = Array.from(document.querySelectorAll("button, [role='button'], input[type='submit']"))
+        .slice(0, 10)
+        .map(el => ({
+          text: (el.innerText || el.textContent || el.value || "").trim().slice(0, 30),
+          bgColor: getStyle(el, "background-color"),
+          color: getStyle(el, "color"),
+          borderRadius: getStyle(el, "border-radius"),
+          fontSize: getStyle(el, "font-size")
+        }));
+
+      // Input fields
+      const inputs = Array.from(document.querySelectorAll("input, textarea, select"))
+        .filter(el => !["submit", "button", "reset", "hidden"].includes(el.getAttribute("type")))
+        .slice(0, 10)
+        .map(el => ({
+          type: el.getAttribute("type") || el.tagName.toLowerCase(),
+          name: el.getAttribute("name") || el.id,
+          placeholder: el.getAttribute("placeholder"),
+          borderColor: getStyle(el, "border-color"),
+          borderRadius: getStyle(el, "border-radius")
+        }));
+
+      return {
+        title: document.title,
+        url: window.location.href,
+        layout: {
+          display: bodyStyle.display,
+          fontFamily: bodyStyle.fontFamily.split(",")[0].trim().replace(/['"]/g, ""),
+          fontSize: bodyStyle.fontSize,
+          backgroundColor: bodyStyle.backgroundColor
+        },
+        colors: Array.from(colorSet).slice(0, 20),
+        fonts: Array.from(fontSet).slice(0, 10),
+        buttons,
+        inputs,
+        headingCount: document.querySelectorAll("h1,h2,h3,h4,h5,h6").length,
+        formCount: document.querySelectorAll("form").length,
+        imageCount: document.querySelectorAll("img").length,
+        linkCount: document.querySelectorAll("a[href]").length
+      };
+    });
+
+    this.logAction(session, { action: "extractUiSchema", result: "success", metadata: { url: schema.url } });
+    return { sessionId: session.id, ...schema };
+  }
+
+  async _intelligentFillField(session, fieldInfo, value, isTurbo, fieldName) {
+    fieldName = fieldName || fieldInfo.label || fieldInfo.name || "unknown field";
     let locator = session.page.locator(fieldInfo.selector).first();
 
     // Wait for element visibility

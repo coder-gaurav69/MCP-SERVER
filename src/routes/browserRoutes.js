@@ -363,7 +363,56 @@ router.post("/flow/:template", async (req, res) => {
   }
 });
 
-router.get("/state", async (req, res) => {
+router.post("/autonomous_goal", async (req, res) => {
+  try {
+    const { sessionId, url, goal, fields, turbo, submit } = req.body || {};
+    const turboVal = turbo !== undefined ? ["true", "1", "yes", "y"].includes(String(turbo).toLowerCase()) : false;
+    const submitVal = submit !== undefined ? ["true", "1", "yes", "y"].includes(String(submit).toLowerCase()) : false;
+    const data = await runAgentAction("autonomous_goal", () =>
+      browserService.autonomousGoal({ sessionId, url, goal: goal || "", fields: fields || null, turbo: turboVal, submit: submitVal })
+    );
+    // Strip imageBase64 from REST response — clients should use screenshotUrl instead
+    const { imageBase64: _stripped, ...safeData } = data || {};
+    return res.json(success("autonomous_goal", safeData));
+  } catch (error) {
+    return res.status(500).json(failure("autonomous_goal", error));
+  }
+});
+
+router.post("/scrape_content", async (req, res) => {
+  try {
+    const { sessionId, query } = req.body || {};
+    if (!sessionId) return res.status(400).json(failure("scrape_content", "Missing required field: sessionId"));
+    const data = await runAgentAction("scrape_content", () => browserService.scrapeContent({ sessionId, query }));
+    return res.json(success("scrape_content", data));
+  } catch (error) {
+    return res.status(500).json(failure("scrape_content", error));
+  }
+});
+
+router.get("/scrape_content", async (req, res) => {
+  try {
+    const { sessionId, query } = req.query;
+    if (!sessionId) return res.status(400).json(failure("scrape_content", "Missing required query: sessionId"));
+    const data = await runAgentAction("scrape_content", () => browserService.scrapeContent({ sessionId, query }));
+    return res.json(success("scrape_content", data));
+  } catch (error) {
+    return res.status(500).json(failure("scrape_content", error));
+  }
+});
+
+router.get("/extract_ui_schema", async (req, res) => {
+  try {
+    const { sessionId } = req.query;
+    if (!sessionId) return res.status(400).json(failure("extract_ui_schema", "Missing required query: sessionId"));
+    const data = await runAgentAction("extract_ui_schema", () => browserService.extractUiSchema({ sessionId }));
+    return res.json(success("extract_ui_schema", data));
+  } catch (error) {
+    return res.status(500).json(failure("extract_ui_schema", error));
+  }
+});
+
+
   try {
     const sessionId = req.query.sessionId;
     if (!sessionId) return res.status(400).json(failure("state", "Missing required query: sessionId"));
